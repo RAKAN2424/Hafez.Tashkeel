@@ -3,13 +3,14 @@
 Builds a genuine, 100% self-contained 64-bit Windows PE32+ executable (`setup.exe`)
 with:
   - Embedded Hafiz Bel'Amya multi-resolution Windows icon (`.rsrc`)
-  - Self-contained automated installer & launcher script embedded via PowerShell -EncodedCommand
-    (zero external .bat / .ps1 setup files required)
-  - ASLR-compatible RIP-relative x64 machine code importing only kernel32.dll & user32.dll
+  - Clean UTF-8 PowerShell script embedded in `.rdata` (from `installer/HafizSetup.ps1`),
+    written to `%TEMP%\\HafizBelAmyaSetup.ps1` and executed via:
+    `powershell.exe -NoExit -NoProfile -ExecutionPolicy Bypass -File "<temp>\\HafizBelAmyaSetup.ps1"`
+  - Zero Base64 `-EncodedCommand` obfuscation and `-NoExit` console safety so the
+    console window never flashes shut silently.
 """
 
 from pathlib import Path
-import base64
 import os
 import struct
 import subprocess
@@ -17,193 +18,13 @@ import tempfile
 import zlib
 
 
-POWERSHELL_SETUP_SCRIPT = r"""
-$ErrorActionPreference = 'Continue'
-[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-$Host.UI.RawUI.WindowTitle = "Hafiz Bel'Amya - Setup & Auto-Launcher"
+PS1_PATH = Path(__file__).resolve().parent / "HafizSetup.ps1"
 
-try {
-  $Root = (Get-Location).Path
-  $DlDir = Join-Path $env:TEMP 'HafizBelAmyaSetup'
-  if (-not (Test-Path $DlDir)) { New-Item -ItemType Directory -Path $DlDir -Force | Out-Null }
 
-  Write-Host '============================================================================' -ForegroundColor Cyan
-  Write-Host "  Hafiz Bel'Amya - Standalone Automated Setup (.exe)" -ForegroundColor Cyan
-  Write-Host '============================================================================' -ForegroundColor Cyan
-  Write-Host "Working Directory: $Root"
-  Write-Host ''
-
-  function Refresh-EnvPath {
-    $m = [System.Environment]::GetEnvironmentVariable('Path', 'Machine')
-    $u = [System.Environment]::GetEnvironmentVariable('Path', 'User')
-    $env:Path = "$m;$u"
-  }
-
-  function Ensure-Tool {
-    param([string]$Cmd, [string]$Title, [string]$WingetId, [string]$Url, [string]$FileName)
-    if (Get-Command $Cmd -ErrorAction SilentlyContinue) {
-      Write-Host "[OK] $Title detected." -ForegroundColor Green
-      return $true
-    }
-    Write-Host "[MISSING] $Title not found." -ForegroundColor Yellow
-    if (Get-Command 'winget' -ErrorAction SilentlyContinue) {
-      Write-Host "  -> Installing $Title via winget..." -ForegroundColor Cyan
-      winget install --id $WingetId --silent --accept-package-agreements --accept-source-agreements
-      Refresh-EnvPath
-      if (Get-Command $Cmd -ErrorAction SilentlyContinue) {
-        Write-Host "[OK] $Title installed." -ForegroundColor Green
-        return $true
-      }
-    }
-    $dest = Join-Path $DlDir $FileName
-    Write-Host "  -> Downloading $Title from $Url ..." -ForegroundColor Cyan
-    try {
-      Invoke-WebRequest -Uri $Url -OutFile $dest -UseBasicParsing
-      if ($dest.EndsWith('.msi')) {
-        Start-Process msiexec.exe -ArgumentList "/i `"$dest`" /passive" -Wait
-      } elseif ($dest.EndsWith('.exe')) {
-        Start-Process $dest -ArgumentList '/passive PrependPath=1 Include_test=0' -Wait
-      } elseif ($dest.EndsWith('.zip')) {
-        $ffDir = Join-Path $Root 'installer\ffmpeg'
-        Expand-Archive -Path $dest -DestinationPath $ffDir -Force
-        $binDir = Get-ChildItem -Path $ffDir -Recurse -Directory -Filter 'bin' | Select-Object -First 1
-        if ($binDir) { $env:Path = "$($binDir.FullName);$env:Path" }
-      }
-      Refresh-EnvPath
-    } catch {
-      Write-Host "[WARN] Download error: $_" -ForegroundColor Red
-      Start-Process $Url
-    }
-    return [bool](Get-Command $Cmd -ErrorAction SilentlyContinue)
-  }
-
-  Write-Host '[1/5] Checking System Tools (Python 3.11, Node.js 20, FFmpeg)...' -ForegroundColor White
-  $hasPy = Ensure-Tool 'python' 'Python 3.11' 'Python.Python.3.11' 'https://www.python.org/ftp/python/3.11.9/python-3.11.9-amd64.exe' 'python-3.11.9-amd64.exe'
-  $hasNode = Ensure-Tool 'node' 'Node.js 20 LTS' 'OpenJS.NodeJS.LTS' 'https://nodejs.org/dist/v20.18.1/node-v20.18.1-x64.msi' 'node-v20.18.1-x64.msi'
-  $null = Ensure-Tool 'ffmpeg' 'FFmpeg' 'Gyan.FFmpeg' 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip' 'ffmpeg-release-essentials.zip'
-
-  if (-not $hasPy) {
-    Write-Host '[ERROR] Python is required to install AI backends. Finish Python installation then run setup.exe again.' -ForegroundColor Red
-    Read-Host 'Press Enter to exit'
-    exit 1
-  }
-
-  $InProjectRoot = (Test-Path (Join-Path $Root 'package.json')) -and (Test-Path (Join-Path $Root 'server.ts'))
-
-  if ($InProjectRoot) {
-    $LocalModelsDir = Join-Path $Root 'models\local'
-    if (-not (Test-Path $LocalModelsDir)) { New-Item -ItemType Directory -Path $LocalModelsDir -Force | Out-Null }
-    Write-Host ''
-    Write-Host '[2/5] Checking Node.js dependencies...' -ForegroundColor White
-    if ($hasNode -and (-not (Test-Path (Join-Path $Root 'node_modules')))) {
-      & npm.cmd install
-    }
-    Write-Host ''
-    Write-Host '[3/5] Checking Python environment & required AI backends...' -ForegroundColor White
-    $PyExe = Join-Path $Root '.venv\Scripts\python.exe'
-    if (-not (Test-Path $PyExe)) {
-      Write-Host '  -> Creating .venv...' -ForegroundColor Cyan
-      python -m venv .venv
-    }
-    if (-not (Test-Path $PyExe)) { $PyExe = 'python' }
-  } else {
-    Write-Host ''
-    Write-Host '[STANDALONE MODE] App folder (package.json) not found next to setup.exe.' -ForegroundColor Yellow
-    Write-Host 'Installing required AI Python backends so the app is ready when placed in the Hafiz folder...' -ForegroundColor Cyan
-    $PyExe = 'python'
-  }
-
-  $ReqPath = Join-Path $Root 'requirements.txt'
-  if (Test-Path $ReqPath) {
-    & $PyExe -m pip install -r $ReqPath --quiet
-  } else {
-    & $PyExe -m pip install llama-cpp-python torch torchaudio transformers accelerate safetensors sentencepiece protobuf huggingface_hub einops peft faster-whisper ctranslate2 soundfile librosa scipy piper-tts onnxruntime requests --quiet
-  }
-
-  Write-Host ''
-  Write-Host '[4/5] Checking NVIDIA CUDA acceleration status (critical check only)...' -ForegroundColor Cyan
-  $hasGpu = [bool](Get-Command 'nvidia-smi' -ErrorAction SilentlyContinue)
-  if ($hasGpu) {
-    $pyCuda = @'
-import sys
-missing = []
-try:
-    import torch
-    if not getattr(torch.version, 'cuda', None):
-        missing.append('torch')
-except Exception:
-    missing.append('torch')
-try:
-    import llama_cpp
-    fn = getattr(llama_cpp, 'llama_supports_gpu_offload', None)
-    if callable(fn) and not fn():
-        missing.append('llama-cpp-python')
-except Exception:
-    pass
-print(','.join(missing))
-'@
-    $needCu = (& $PyExe -c $pyCuda 2>$null | Out-String).Trim()
-    if ($needCu -match 'torch') {
-      Write-Host '[CUDA] Installing PyTorch CUDA 12.4 wheel for NVIDIA GPU...' -ForegroundColor Green
-      & $PyExe -m pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu124
-    }
-    if ($needCu -match 'llama-cpp-python') {
-      Write-Host '[CUDA] Installing llama-cpp-python CUDA 12.4 wheel...' -ForegroundColor Green
-      & $PyExe -m pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124
-    }
-    if (-not $needCu) {
-      Write-Host '[OK] NVIDIA CUDA GPU acceleration is already active.' -ForegroundColor Green
-    }
-  } else {
-    Write-Host '[INFO] No NVIDIA GPU detected; CPU mode active.' -ForegroundColor DarkCyan
-  }
-
-  Write-Host ''
-  Write-Host '[5/5] Scanning mounted partitions (C:, D:, E:, ...) for AI models...' -ForegroundColor Green
-  $sub = @('AI\LMStudio-Models\local','LMStudio-Models\local','OmniVoice','Models','models\local','.lmstudio\models','.cache\huggingface\hub')
-  $drv = @([System.IO.DriveInfo]::GetDrives() | Where-Object { $_.IsReady -and ($_.DriveType -eq 'Fixed' -or $_.DriveType -eq 'Removable') })
-  $hits = @()
-  foreach ($d in $drv) {
-    foreach ($s in $sub) { $p = Join-Path $d.Name $s; if (Test-Path $p) { $hits += $p } }
-  }
-  foreach ($s in @('.lmstudio\models','.cache\huggingface\hub')) { $p = Join-Path $env:USERPROFILE $s; if (Test-Path $p) { $hits += $p } }
-  if ($hits.Count -gt 0) {
-    $hits = @($hits | Select-Object -Unique)
-    Write-Host ('[FOUND] Model roots: ' + ($hits -join ' ; ')) -ForegroundColor Cyan
-  } else {
-    Write-Host '[INFO] Partition auto-scan will run inside Hafiz Server on boot.' -ForegroundColor DarkCyan
-  }
-
-  if ($InProjectRoot -and $hasNode) {
-    if ($PyExe -ne 'python') { $env:PYTHON_BIN = $PyExe }
-    $env:DISABLE_HMR = 'true'
-    $env:HAFIZ_AUTO_SCAN_PARTITIONS = '1'
-    Start-Job -ScriptBlock {
-      for ($i = 0; $i -lt 45; $i++) {
-        try {
-          $r = Invoke-WebRequest -Uri 'http://127.0.0.1:3000/api/setup/status' -UseBasicParsing -TimeoutSec 2
-          if ($r.StatusCode -eq 200) { Start-Process 'http://localhost:3000'; break }
-        } catch {}
-        Start-Sleep -Seconds 1
-      }
-    } | Out-Null
-    Write-Host '[Server] Starting Hafiz Bel''Amya on http://localhost:3000 ...' -ForegroundColor Green
-    if (Get-Command 'npx.cmd' -ErrorAction SilentlyContinue) {
-      & npx.cmd tsx server.ts
-    } else {
-      & npx tsx server.ts
-    }
-  } else {
-    Write-Host ''
-    Write-Host '[DONE] Dependencies ready! Place setup.exe inside the Hafiz project folder and run again to start.' -ForegroundColor Green
-  }
-} catch {
-  Write-Host ''
-  Write-Host "[SETUP ERROR] $_" -ForegroundColor Red
-}
-Write-Host ''
-Read-Host 'Press Enter to close'
-""".strip()
+def load_ps1_utf8_bom() -> bytes:
+    raw = PS1_PATH.read_text(encoding="utf-8")
+    crlf = raw.replace("\r\n", "\n").replace("\n", "\r\n")
+    return b"\xef\xbb\xbf" + crlf.encode("utf-8")
 
 
 def make_png_rgba(size: int) -> bytes:
@@ -365,7 +186,7 @@ def utf16z(s: str) -> bytes:
     return (s + "\0").encode("utf-16-le")
 
 
-def build_rdata(rdata_rva: int):
+def build_rdata(rdata_rva: int, ps1_bytes: bytes):
     buf = bytearray()
     sym: dict[str, int] = {}
 
@@ -375,16 +196,17 @@ def build_rdata(rdata_rva: int):
         sym[name] = rdata_rva + len(buf)
         buf.extend(data)
 
-    encoded_ps = base64.b64encode(POWERSHELL_SETUP_SCRIPT.encode("utf-16-le")).decode("ascii")
-    ps_cmd = f"powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand {encoded_ps}"
-    assert len(ps_cmd) < 28000, f"Embedded PowerShell command too long ({len(ps_cmd)} chars)"
-
-    add_bytes("cmd_embedded_setup", utf16z(ps_cmd))
+    add_bytes("ps1_utf8_blob", ps1_bytes, 4)
+    add_bytes("str_ps1_name", utf16z("HafizBelAmyaSetup.ps1"))
+    add_bytes(
+        "cmd_ps_prefix",
+        utf16z('powershell.exe -NoExit -NoProfile -ExecutionPolicy Bypass -File "'),
+    )
     add_bytes(
         "str_err_msg",
         utf16z(
             "Hafiz Bel'Amya Setup could not start PowerShell on this machine.\n\n"
-            "Please ensure Windows PowerShell 5.1+ is enabled and try again."
+            "You can also run start_hafiz.bat or Hafiz_Online_Setup.bat directly from the app folder."
         ),
     )
     add_bytes("str_err_title", utf16z("Hafiz Bel'Amya Setup"))
@@ -392,6 +214,9 @@ def build_rdata(rdata_rva: int):
     k32_funcs = [
         "GetModuleFileNameW",
         "SetCurrentDirectoryW",
+        "GetTempPathW",
+        "CreateFileW",
+        "WriteFile",
         "CreateProcessW",
         "WaitForSingleObject",
         "GetExitCodeProcess",
@@ -454,19 +279,24 @@ def build_rdata(rdata_rva: int):
     return bytes(buf), sym
 
 
-def assemble_text(text_rva: int, data_rva: int, sym: dict[str, int]) -> bytes:
+def assemble_text(text_rva: int, data_rva: int, sym: dict[str, int], ps1_len: int) -> bytes:
     DATA_EXE_PATH = data_rva + 0x000      # 1040 bytes (520 wchar_t)
-    DATA_STARTUP = data_rva + 0x420       # 104 bytes STARTUPINFOW
-    DATA_PROCINFO = data_rva + 0x4A0      # 24 bytes PROCESS_INFORMATION
-    DATA_EXITCODE = data_rva + 0x4C0      # 4 bytes DWORD
-    DATA_CMD_BUF = data_rva + 0x500       # up to 32 KB mutable UTF-16LE command buffer
+    DATA_TEMP_PATH = data_rva + 0x420     # 1040 bytes (520 wchar_t)
+    DATA_WRITTEN = data_rva + 0x840       # 8 bytes DWORD
+    DATA_STARTUP = data_rva + 0x860       # 104 bytes STARTUPINFOW
+    DATA_PROCINFO = data_rva + 0x8E0      # 24 bytes PROCESS_INFORMATION
+    DATA_EXITCODE = data_rva + 0x900      # 4 bytes DWORD
+    DATA_CMD_BUF = data_rva + 0x920       # mutable UTF-16LE command line buffer
 
     equs = [
         f".set D_EXE_PATH, _start + {DATA_EXE_PATH - text_rva}",
+        f".set D_TEMP_PATH, _start + {DATA_TEMP_PATH - text_rva}",
+        f".set D_WRITTEN, _start + {DATA_WRITTEN - text_rva}",
         f".set D_STARTUP, _start + {DATA_STARTUP - text_rva}",
         f".set D_PROCINFO, _start + {DATA_PROCINFO - text_rva}",
         f".set D_EXITCODE, _start + {DATA_EXITCODE - text_rva}",
         f".set D_CMD_BUF, _start + {DATA_CMD_BUF - text_rva}",
+        f".set PS1_BLOB_LEN, {ps1_len}",
     ]
     for k, v in sym.items():
         equs.append(f".set {k}, _start + {v - text_rva}")
@@ -501,19 +331,86 @@ done_slash:
     call qword ptr [rip + iat_SetCurrentDirectoryW]
 skip_chdir:
 
-    # 2. Copy embedded PowerShell installer command into mutable D_CMD_BUF
-    lea rsi, [rip + cmd_embedded_setup]
-    lea rdi, [rip + D_CMD_BUF]
-    mov r12, rdi
-copy_cmd:
+    # 2. Build %TEMP%\HafizBelAmyaSetup.ps1
+    mov ecx, 460
+    lea rdx, [rip + D_TEMP_PATH]
+    call qword ptr [rip + iat_GetTempPathW]
+    test eax, eax
+    jz show_missing_box
+    cmp eax, 460
+    ja show_missing_box
+
+    lea rdi, [rip + D_TEMP_PATH]
+    mov ecx, eax
+    lea rdi, [rdi + rcx * 2]
+    cmp word ptr [rdi - 2], 0x005C
+    je append_ps1_name
+    mov word ptr [rdi], 0x005C
+    add rdi, 2
+append_ps1_name:
+    lea rsi, [rip + str_ps1_name]
+copy_ps1_name:
     mov ax, word ptr [rsi]
     mov word ptr [rdi], ax
     add rsi, 2
     add rdi, 2
     test ax, ax
-    jnz copy_cmd
+    jnz copy_ps1_name
 
-    # 3. CreateProcessW(NULL, D_CMD_BUF, ..., &si, &pi)
+    # 3. CreateFileW(D_TEMP_PATH, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL)
+    lea rcx, [rip + D_TEMP_PATH]
+    mov edx, 0x40000000
+    mov r8d, 1
+    xor r9, r9
+    mov qword ptr [rsp + 32], 2
+    mov qword ptr [rsp + 40], 0x80
+    mov qword ptr [rsp + 48], 0
+    call qword ptr [rip + iat_CreateFileW]
+    cmp rax, -1
+    je show_missing_box
+    mov rbx, rax
+
+    # 4. WriteFile(hFile, ps1_utf8_blob, PS1_BLOB_LEN, &D_WRITTEN, NULL)
+    mov rcx, rbx
+    lea rdx, [rip + ps1_utf8_blob]
+    mov r8d, PS1_BLOB_LEN
+    lea r9, [rip + D_WRITTEN]
+    mov qword ptr [rsp + 32], 0
+    call qword ptr [rip + iat_WriteFile]
+    mov r12d, eax
+
+    mov rcx, rbx
+    call qword ptr [rip + iat_CloseHandle]
+    test r12d, r12d
+    jz show_missing_box
+
+    # 5. Build short command line: powershell.exe -NoExit -NoProfile -ExecutionPolicy Bypass -File "<temp>\HafizBelAmyaSetup.ps1"
+    lea rdi, [rip + D_CMD_BUF]
+    mov r12, rdi
+    lea rsi, [rip + cmd_ps_prefix]
+copy_prefix:
+    mov ax, word ptr [rsi]
+    test ax, ax
+    jz copy_temp_arg
+    mov word ptr [rdi], ax
+    add rsi, 2
+    add rdi, 2
+    jmp copy_prefix
+copy_temp_arg:
+    lea rsi, [rip + D_TEMP_PATH]
+copy_temp_loop:
+    mov ax, word ptr [rsi]
+    test ax, ax
+    jz finish_cmd
+    mov word ptr [rdi], ax
+    add rsi, 2
+    add rdi, 2
+    jmp copy_temp_loop
+finish_cmd:
+    mov word ptr [rdi], 0x0022
+    mov word ptr [rdi + 2], 0
+
+    # 6. CreateProcessW(NULL, D_CMD_BUF, ..., &si, &pi)
     lea r13, [rip + D_STARTUP]
     mov dword ptr [r13], 104
     lea r14, [rip + D_PROCINFO]
@@ -578,14 +475,15 @@ def build_setup_exe(output_path: Path):
     TEXT_RVA = 0x1000
     RDATA_RVA = 0x2000
 
-    rdata_bytes, sym = build_rdata(RDATA_RVA)
+    ps1_bytes = load_ps1_utf8_bom()
+    rdata_bytes, sym = build_rdata(RDATA_RVA, ps1_bytes)
     rdata_span = align_up(len(rdata_bytes), SECT_ALIGN)
 
     DATA_RVA = RDATA_RVA + rdata_span
-    DATA_VSIZE = 0x11000  # 68 KB scratch space for path, structs, mutable UTF-16LE command line
+    DATA_VSIZE = 0x2000  # 8 KB scratch space for paths, structs, and short PS command line
     RSRC_RVA = DATA_RVA + align_up(DATA_VSIZE, SECT_ALIGN)
 
-    text_bytes = assemble_text(TEXT_RVA, DATA_RVA, sym)
+    text_bytes = assemble_text(TEXT_RVA, DATA_RVA, sym, len(ps1_bytes))
     assert len(text_bytes) <= 0x1000, f".text exceeded 4KB ({len(text_bytes)})"
 
     icons = [
@@ -626,7 +524,8 @@ def build_setup_exe(output_path: Path):
     rsrc_vsize = len(rsrc_bytes)
     size_of_image = align_up(RSRC_RVA + rsrc_vsize, SECT_ALIGN)
 
-    coff = b"PE\0\0" + struct.pack("<HHIIIHH", 0x8664, num_sections, 0, 0, 0, 240, 0x0022)
+    # 0x0023 = IMAGE_FILE_RELOCS_STRIPPED | IMAGE_FILE_EXECUTABLE_IMAGE | IMAGE_FILE_LARGE_ADDRESS_AWARE
+    coff = b"PE\0\0" + struct.pack("<HHIIIHH", 0x8664, num_sections, 0, 0, 0, 240, 0x0023)
 
     opt = bytearray(240)
     struct.pack_into(

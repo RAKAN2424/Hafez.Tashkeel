@@ -1568,7 +1568,8 @@ ${taskInstruction}
     bgUpdateTimer.unref();
   };
 
-  if (process.env.NODE_ENV !== 'production') {
+  const distIndexPath = path.join(process.cwd(), 'dist', 'index.html');
+  if (process.env.NODE_ENV !== 'production' || !fs.existsSync(distIndexPath)) {
     const vite = await createViteServer({
       server: {
         middlewareMode: true,

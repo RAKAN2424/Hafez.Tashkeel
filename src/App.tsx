@@ -385,6 +385,8 @@ const App = () => {
   // UI & Theme state
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [shortcutFeedback, setShortcutFeedback] = useState<string | null>(null);
+  const shortcutToastTimerRef = useRef<number | null>(null);
   const [copyStatus, setCopyStatus] = useState(false);
   const [brandImgFailed, setBrandImgFailed] = useState(false);
   const [genre, setGenre] = useState('mahraganat');
@@ -1902,10 +1904,27 @@ const App = () => {
     );
   };
 
-  const saveInput = () => localStorage.setItem('rika_saved_input', inputText);
+  const triggerShortcutFeedback = (msg: string) => {
+    setShortcutFeedback(msg);
+    if (shortcutToastTimerRef.current) {
+      window.clearTimeout(shortcutToastTimerRef.current);
+    }
+    shortcutToastTimerRef.current = window.setTimeout(() => {
+      setShortcutFeedback(null);
+      shortcutToastTimerRef.current = null;
+    }, 2600);
+  };
+
+  const saveInput = () => {
+    localStorage.setItem('rika_saved_input', inputText);
+    triggerShortcutFeedback(t.shortcutSavedToast);
+  };
   const loadInput = () => {
     const saved = localStorage.getItem('rika_saved_input');
-    if (saved) setInputText(saved);
+    if (saved) {
+      setInputText(saved);
+      triggerShortcutFeedback(t.shortcutLoadedToast);
+    }
   };
 
   const downloadOutput = () => {
@@ -1959,6 +1978,95 @@ const App = () => {
     }
     downloadOutput();
   };
+
+  const globalShortcutHandlerRef = useRef<(e: KeyboardEvent) => void>(() => {});
+  globalShortcutHandlerRef.current = (e: KeyboardEvent) => {
+    if (e.key === 'Escape') {
+      if (showSunoModal) {
+        e.preventDefault();
+        setShowSunoModal(false);
+        return;
+      }
+      if (showVoiceCloneModal) {
+        e.preventDefault();
+        setShowVoiceCloneModal(false);
+        return;
+      }
+    }
+
+    const mod = e.ctrlKey || e.metaKey;
+    if (!mod || e.altKey) return;
+
+    const lowerKey = e.key.toLowerCase();
+
+    // Ctrl/Cmd + Enter -> run active Studio/Audio task (Ctrl+Shift+Enter -> compose song in Studio)
+    if (e.key === 'Enter') {
+      if (showSunoModal) {
+        if (sunoMood.trim() && sunoGenre.trim()) {
+          e.preventDefault();
+          void handleGenerateMusicPrompt();
+        }
+        return;
+      }
+      if (isLoading) return;
+      if (activeTab === 'studio' && inputText.trim()) {
+        e.preventDefault();
+        if (e.shiftKey) {
+          void handleLyricsAction('compose_song');
+        } else {
+          void handleDiacriticsAction('smart_light');
+        }
+        return;
+      }
+      if (activeTab === 'audio') {
+        const hasWebTarget = Boolean(
+          webAgentMode === 'url' ? webAgentUrl.trim() : webAgentQuery.trim()
+        );
+        if (hasWebTarget) {
+          e.preventDefault();
+          void handleRunWebAgent();
+          return;
+        }
+        if (audioFile) {
+          e.preventDefault();
+          void processAudioASR('egyptian');
+          return;
+        }
+      }
+      return;
+    }
+
+    // Ctrl/Cmd + Shift + S -> Save current studio input draft
+    if (e.shiftKey && lowerKey === 's') {
+      e.preventDefault();
+      saveInput();
+      return;
+    }
+
+    // Ctrl/Cmd + Shift + L -> Load saved studio input draft
+    if (e.shiftKey && lowerKey === 'l') {
+      e.preventDefault();
+      loadInput();
+      return;
+    }
+
+    // Ctrl/Cmd + Shift + C -> Copy current result output
+    if (e.shiftKey && lowerKey === 'c' && outputResult) {
+      e.preventDefault();
+      copyToClipboard();
+    }
+  };
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => globalShortcutHandlerRef.current(e);
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      if (shortcutToastTimerRef.current) {
+        window.clearTimeout(shortcutToastTimerRef.current);
+      }
+    };
+  }, []);
 
   // Virtualized Output Renderer
   const VirtualizedOutput = ({ text, type }: { text: string; type: string }) => {
@@ -2499,6 +2607,24 @@ const App = () => {
           </div>
         )}
 
+        {/* Keyboard Shortcut Action Confirmation Banner */}
+        {shortcutFeedback && (
+          <div className="p-3 rounded-xl border border-emerald-200 dark:border-emerald-900/70 bg-emerald-50/70 dark:bg-emerald-950/30 text-emerald-800 dark:text-emerald-200 flex items-center justify-between gap-3 text-xs font-semibold">
+            <div className="flex items-center gap-2">
+              <CheckCircle2 size={15} className="shrink-0" />
+              <span>{shortcutFeedback}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setShortcutFeedback(null)}
+              className="p-1 opacity-75 hover:opacity-100"
+              aria-label={t.close}
+            >
+              <X size={14} />
+            </button>
+          </div>
+        )}
+
         {/* Global Error Banner */}
         {error && (
           <div className="p-4 rounded-xl border border-red-200 dark:border-red-900/60 bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 flex items-center justify-between gap-3">
@@ -2606,7 +2732,7 @@ const App = () => {
                     </button>
                     <button
                       onClick={loadInput}
-                      title={t.loadSaved}
+                      title={`${t.loadSaved} (Ctrl+Shift+L)`}
                       aria-label={t.loadSaved}
                       className="h-9 w-9 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#0B0D11] text-slate-600 dark:text-slate-300 hover:text-indigo-600 dark:hover:text-indigo-400 flex items-center justify-center transition-colors"
                     >
@@ -2614,7 +2740,7 @@ const App = () => {
                     </button>
                     <button
                       onClick={saveInput}
-                      title={t.saveText}
+                      title={`${t.saveText} (Ctrl+Shift+S)`}
                       aria-label={t.saveText}
                       className="h-9 w-9 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#0B0D11] text-slate-600 dark:text-slate-300 hover:text-emerald-600 dark:hover:text-emerald-400 flex items-center justify-center transition-colors"
                     >
@@ -2735,6 +2861,7 @@ const App = () => {
                     <button
                       onClick={() => handleDiacriticsAction('smart_light')}
                       disabled={isLoading || !inputText.trim()}
+                      title={`${t.lightDiacriticsBtn} (Ctrl+Enter)`}
                       className="h-11 px-3 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs sm:text-sm font-semibold flex items-center justify-center gap-2 transition-colors disabled:opacity-40 whitespace-nowrap"
                     >
                       <Sparkles size={15} className="shrink-0" />
@@ -2828,6 +2955,7 @@ const App = () => {
                     <button
                       onClick={() => handleLyricsAction('compose_song')}
                       disabled={isLoading || !inputText.trim()}
+                      title={`${t.composeBtn} (Ctrl+Shift+Enter)`}
                       className="h-11 px-3 rounded-xl border border-indigo-600/30 dark:border-indigo-500/40 bg-indigo-50 dark:bg-indigo-950/30 hover:bg-indigo-100 dark:hover:bg-indigo-950/50 text-indigo-700 dark:text-indigo-300 text-xs sm:text-sm font-semibold flex items-center justify-center gap-2 transition-colors disabled:opacity-40 whitespace-nowrap"
                     >
                       <Music size={15} className="shrink-0" />
@@ -2880,6 +3008,10 @@ const App = () => {
                     </button>
                   </div>
                 </div>
+
+                <p className="pt-2 border-t border-slate-100 dark:border-slate-800/80 text-[11px] text-slate-500 dark:text-slate-400">
+                  {t.studioShortcutsHint}
+                </p>
               </section>
 
               {/* Output Panel */}

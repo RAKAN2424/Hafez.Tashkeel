@@ -259,6 +259,9 @@ export const translations = {
     setupScheduleWeekly: "أسبوعياً (كل 7 أيام)",
     setupNotifyCriticalOnlyLabel: "إشعار فقط عند وجود ترقية ضرورية (CUDA أو مكتبة أساسية مفقودة) بدلاً من التحديث التلقائي الفوري",
     setupCriticalUpgradeBanner: "توجد ترقية ضرورية للنظام (CUDA / مكتبة أساسية) لتسريع أو تشغيل الموديلات:",
+    shortcutSavedToast: "تم حفظ نص المسودة (Ctrl+Shift+S)",
+    shortcutLoadedToast: "تم استرجاع المسودة المحفوظة (Ctrl+Shift+L)",
+    studioShortcutsHint: "اختصارات سريعة: Ctrl+Enter للتشكيل الذكي · Ctrl+Shift+Enter للتأليف · Ctrl+Shift+S للحفظ · Ctrl+Shift+L للاسترجاع · Ctrl+Shift+C لنسخ النتيجة",
     genres: {
       mahraganat: "مهرجانات شعبية",
       shaabi: "شعبي قديم/مودرن",
@@ -562,6 +565,9 @@ export const translations = {
     setupScheduleWeekly: "Weekly (every 7 days)",
     setupNotifyCriticalOnlyLabel: "Notify only on essential upgrades (CUDA GPU or missing core package) instead of immediate auto-update",
     setupCriticalUpgradeBanner: "Essential upgrade recommended (CUDA GPU or missing core backend):",
+    shortcutSavedToast: "Draft input saved (Ctrl+Shift+S)",
+    shortcutLoadedToast: "Saved draft restored (Ctrl+Shift+L)",
+    studioShortcutsHint: "Shortcuts: Ctrl+Enter run diacritics · Ctrl+Shift+Enter compose · Ctrl+Shift+S save input · Ctrl+Shift+L load draft · Ctrl+Shift+C copy output",
     genres: {
       mahraganat: "Mahraganat",
       shaabi: "Shaabi",
