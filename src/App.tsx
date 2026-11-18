@@ -1,94 +1,312 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { 
-  Mic, MicOff, Copy, Trash2, Music, Sparkles, 
-  RefreshCw, Check, AlertCircle, PlaySquare, Info, 
-  Feather, Volume2, VolumeX, Search, BookOpen,
-  Download, Save, FolderOpen, X, Headphones,
-  Upload, FileAudio, Moon, Sun, Languages, History as HistoryIcon,
-  Pause, Play, CheckCircle2, Youtube
+import {
+  Mic,
+  MicOff,
+  Copy,
+  Trash2,
+  Music,
+  RefreshCw,
+  Check,
+  AlertCircle,
+  Info,
+  Feather,
+  Volume2,
+  VolumeX,
+  Search,
+  BookOpen,
+  Download,
+  Save,
+  FolderOpen,
+  X,
+  Headphones,
+  Upload,
+  FileAudio,
+  Moon,
+  Sun,
+  Languages,
+  History as HistoryIcon,
+  Pause,
+  Play,
+  CheckCircle2,
+  Youtube,
+  Eraser,
+  Cpu,
+  Sliders,
+  AudioLines,
+  ChevronDown,
+  Sparkles,
+  Globe,
+  Send,
+  ExternalLink,
+  Server,
+  Zap,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { GoogleGenAI } from '@google/genai';
 import { Document, Packer, Paragraph, TextRun } from 'docx';
 import { useVirtualizer } from '@tanstack/react-virtual';
 
 import { translations } from './translations';
 
-const PHONETIC_RULES = `**قواعد الكتابة والتشكيل للعامية المصرية باحترافية وذكاء:**
-1. التشكيل المصري الطبيعي والمريح: استخدم التشكيل ليعكس النطق العامي المصري بشكل احترافي.
-2. قاعدة السكون (الوقف): ضع علامة السكون (ْ) في نهاية كل كلمة (على الحرف الأخير من كل كلمة بلا استثناء) لخلق تقطيع حاد في الصوت (Pause/Staccato) بناءً على طلب المستخدم.
-3. قاعدة حرف القاف (إلغاء القاف تماماً): لا تكتب حرف القاف (ق) أبداً. استبدل أي قاف في الكلمة بهمزة (ء) أو ألف (أ) أو همزة المبرة (ئـ) لضمان عدم نطقها بالشكل الفصحى (مثال: ئلبي بدل قلبي، ديئ بدل دقيق، طريئ بدل طريق).
-4. الكلمات والحروف الزائدة: تنبيه هام، لا تقم أبداً بإضافة الواو المكسورة (وِ) أو أي حروف زائدة في بداية الكلمات أو الأفعال تعسفياً ما لم تكن هناك واو عطف حقيقية.
-5. استبدل الأحرف اللثوية (ث، ذ، ظ) بما يعادلها في النطق المصري (س، ز، ض).
-القاعدة الذهبية: طبق قواعد السكون في آخر الكلمات وتحويل القاف إلى همزة بحذافيرها، مع عدم حشو حروف غير ضرورية (مثل وِ).`;
+type ActiveTab = 'studio' | 'audio' | 'models';
+type ToolSubTab = 'rhymes' | 'rewrite';
+type WebAgentTask = 'extract_lyrics' | 'diacritize_smart' | 'phonetic_suno' | 'analyze_and_prompt' | 'custom';
+type ProviderType =
+  | 'auto'
+  | 'local_disk'
+  | 'python_cli'
+  | 'ollama'
+  | 'openai_compatible'
+  | 'openai_audio'
+  | 'http_custom'
+  | 'fallback_ai';
 
-const appId = typeof (window as any).__app_id !== 'undefined' ? (window as any).__app_id : 'egyptian-studio-pro';
+interface LocalDiskModel {
+  id: string;
+  name: string;
+  path: string;
+  relativePath: string;
+  kind:
+    | 'gguf'
+    | 'hf_dir'
+    | 'ct2_whisper'
+    | 'coqui_xtts'
+    | 'onnx'
+    | 'pytorch'
+    | 'python_script'
+    | 'weight_file';
+  sizeBytes: number;
+  sizeLabel: string;
+  source: 'slot_folder' | 'models_root' | 'models_shared';
+}
+
+interface ModelSlotInfo {
+  id: string;
+  nameAr: string;
+  nameEn: string;
+  roleAr?: string;
+  roleEn?: string;
+  folder: string;
+  apiEndpoint?: string;
+  providerType?: ProviderType;
+  activeAdapter:
+    | 'local_disk'
+    | 'python_cli'
+    | 'ollama'
+    | 'openai_compatible'
+    | 'openai_audio'
+    | 'http'
+    | 'fallback_ai';
+  configuredEndpoint: string | null;
+  modelName?: string;
+  selectedModelPath?: string;
+  availableLocalModels?: LocalDiskModel[];
+  hasApiKey?: boolean;
+  strictLocal?: boolean;
+  supportsLocalLlm?: boolean;
+  scriptDetected: boolean;
+  detectedFiles: string[];
+  helperScript?: string;
+  supportsInternet?: boolean;
+  internetAccess?: boolean;
+}
+
+interface MachineEnvironment {
+  platform: string;
+  arch: string;
+  cpuCores: number;
+  totalMemoryGb: number;
+  freeMemoryGb: number;
+  nodeVersion: string;
+  pythonBin: string;
+  pythonAvailable: boolean;
+  pythonVersion: string | null;
+  pythonPackages?: Record<string, boolean>;
+  localModelsRoot?: string;
+  geminiKeyConfigured: boolean;
+}
+
+interface LocalLlmDiscovery {
+  id: string;
+  label: string;
+  providerType: 'ollama' | 'openai_compatible';
+  baseUrl: string;
+  online: boolean;
+  models: string[];
+  error?: string;
+}
+
+interface VramStatusInfo {
+  policy: {
+    singleModelOnly: boolean;
+    restorePreviousModel: boolean;
+    refreshAfterMultiModel: boolean;
+    gpuMemoryLimitPercent: number;
+    minFreeVramMb: number;
+    idleUnloadSeconds: number;
+    unloadOnExit: boolean;
+  };
+  activeLoadedModel: {
+    slotId: string;
+    adapter: string;
+    modelKey: string;
+    modelLabel: string;
+    endpointUrl?: string;
+    loadedAt: number;
+    lastUsedAt: number;
+  } | null;
+  suspendedModel: {
+    slotId: string;
+    adapter: string;
+    modelKey: string;
+    modelLabel: string;
+  } | null;
+  activePipelineName: string | null;
+  idleSecondsRemaining: number | null;
+  ollamaLoadedModels: Array<{ baseUrl: string; name: string; sizeVramBytes?: number }>;
+  pythonWorkerRunning: boolean;
+  lastUnloadReport: {
+    timestamp: number;
+    reason: string;
+    unloaded: string[];
+  } | null;
+  gpuInfo: {
+    available: boolean;
+    name: string | null;
+    vramFreeMb: number | null;
+    vramTotalMb: number | null;
+  };
+}
+
+const BRAND_IMAGE_URL = 'https://i.ibb.co/ZRDHCGHz/Untitled-1080-x-1080-px.jpg';
 
 const App = () => {
+  const [activeTab, setActiveTab] = useState<ActiveTab>('studio');
+  const [toolSubTab, setToolSubTab] = useState<ToolSubTab>('rhymes');
+
   const [inputText, setInputText] = useState('');
   const [outputResult, setOutputResult] = useState('');
-  const [outputType, setOutputType] = useState(''); 
-  
+  const [outputType, setOutputType] = useState('');
+  const [genderPreference, setGenderPreference] = useState<'auto' | 'masculine' | 'feminine'>('auto');
+  const [autoRead, setAutoRead] = useState(false);
+
+  // Word Inspector state
   const [searchWord, setSearchWord] = useState('');
-  const [wordSuggestions, setWordSuggestions] = useState<any>(null); 
+  const [wordSuggestions, setWordSuggestions] = useState<any>(null);
   const [isSearchingWord, setIsSearchingWord] = useState(false);
+
+  // TTS Reader state
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
+  const [ttsAudioUrl, setTtsAudioUrl] = useState<string | null>(null);
+  const ttsAudioRef = useRef<HTMLAudioElement | null>(null);
 
+  // Suno Modal & Internet Research state
   const [showSunoModal, setShowSunoModal] = useState(false);
   const [sunoMood, setSunoMood] = useState('');
-  const [sunoGenre, setSunoGenre] = useState('');
+  const [sunoGenre, setSunoGenre] = useState('mahraganat');
+  const [sunoWebSearch, setSunoWebSearch] = useState(true);
+  const [lastSourcesChecked, setLastSourcesChecked] = useState<string[]>([]);
+  const [lastInternetUsed, setLastInternetUsed] = useState(false);
+  const [lastEngineUsed, setLastEngineUsed] = useState('');
 
+  // Voice Clone Modal state
   const [showVoiceCloneModal, setShowVoiceCloneModal] = useState(false);
   const [voiceFile, setVoiceFile] = useState<File | null>(null);
   const [targetAudioFile, setTargetAudioFile] = useState<File | null>(null);
   const [generatedAudioUrl, setGeneratedAudioUrl] = useState<string | null>(null);
   const [cloneTargetText, setCloneTargetText] = useState('');
-  const [synthesisStep, setSynthesisStep] = useState(0);
 
+  // Audio, YouTube & Web Lyrics Agent state
+  const [audioFile, setAudioFile] = useState<File | null>(null);
   const [youtubeLink, setYoutubeLink] = useState('');
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [webAgentMode, setWebAgentMode] = useState<'url' | 'search'>('url');
+  const [webAgentUrl, setWebAgentUrl] = useState('');
+  const [webAgentQuery, setWebAgentQuery] = useState('');
+  const [webAgentTask, setWebAgentTask] = useState<WebAgentTask>('extract_lyrics');
+  const [webAgentCustomInstruction, setWebAgentCustomInstruction] = useState('');
+  const [webSearchHits, setWebSearchHits] = useState<{ title: string; url: string; snippet: string }[]>([]);
 
-  const [isListening, setIsListening] = useState(false);
+  // Speech Recording (ASR Model via MediaRecorder) + Live Dictation
+  const [isRecordingASR, setIsRecordingASR] = useState(false);
+  const [isDictatingLive, setIsDictatingLive] = useState(false);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
+  const recognitionRef = useRef<any>(null);
+
+  // Rhymes & Rewrite state
+  const [rhymeWord, setRhymeWord] = useState('');
+  const [lineToRewrite, setLineToRewrite] = useState('');
+
+  // Models Registry, Direct Disk Models, Local LLM Discovery & Host Machine state
+  const [modelSlots, setModelSlots] = useState<ModelSlotInfo[]>([]);
+  const [machineEnv, setMachineEnv] = useState<MachineEnvironment | null>(null);
+  const [localModelsRootInput, setLocalModelsRootInput] = useState('');
+  const [isScanningDisk, setIsScanningDisk] = useState(false);
+  const [showLocalApiPanel, setShowLocalApiPanel] = useState(false);
+  const [localServers, setLocalServers] = useState<LocalLlmDiscovery[]>([]);
+  const [isScanningLocal, setIsScanningLocal] = useState(false);
+  const [customProbeUrl, setCustomProbeUrl] = useState('');
+  const [quickProvider, setQuickProvider] = useState<'ollama' | 'openai_compatible'>('ollama');
+  const [quickEndpoint, setQuickEndpoint] = useState('http://127.0.0.1:11434');
+  const [quickModel, setQuickModel] = useState('');
+  const [quickApiKey, setQuickApiKey] = useState('');
+  const [quickStrictLocal, setQuickStrictLocal] = useState(true);
+  const [isApplyingQuickLocal, setIsApplyingQuickLocal] = useState(false);
+
+  const [isLoadingModels, setIsLoadingModels] = useState(false);
+  const [endpointDrafts, setEndpointDrafts] = useState<Record<string, string>>({});
+  const [providerDrafts, setProviderDrafts] = useState<Record<string, ProviderType>>({});
+  const [modelNameDrafts, setModelNameDrafts] = useState<Record<string, string>>({});
+  const [selectedPathDrafts, setSelectedPathDrafts] = useState<Record<string, string>>({});
+  const [savingSlotId, setSavingSlotId] = useState<string | null>(null);
+  const [testingSlotId, setTestingSlotId] = useState<string | null>(null);
+  const [testResults, setTestResults] = useState<
+    Record<string, { ok: boolean; engine: string; latencyMs: number; sampleOutput?: string; error?: string }>
+  >({});
+  const [vramStatus, setVramStatus] = useState<VramStatusInfo | null>(null);
+  const [isUnloadingGpu, setIsUnloadingGpu] = useState(false);
+  const [isRefreshingGpu, setIsRefreshingGpu] = useState(false);
+  const [isUpdatingVramPolicy, setIsUpdatingVramPolicy] = useState(false);
+
+  // UI & Theme state
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [copyStatus, setCopyStatus] = useState(false);
-  const [history, setHistory] = useState<{id: string, type: string, input: string, output: string, timestamp: number}[]>(() => {
-    if (typeof window !== 'undefined') {
-      const saved = localStorage.getItem('hafiz_history');
-      return saved ? JSON.parse(saved) : [];
-    }
-    return [];
-  });
-  const [uploadProgress, setUploadProgress] = useState(0);
-  const [isUploadSuccess, setIsUploadSuccess] = useState(false);
-
-  useEffect(() => {
-    localStorage.setItem('hafiz_history', JSON.stringify(history));
-  }, [history]);
-
-  const addToHistory = (type: string, input: string, output: string) => {
-    const newItem = {
-      id: Math.random().toString(36).substr(2, 9),
-      type,
-      input,
-      output,
-      timestamp: Date.now()
-    };
-    setHistory(prev => [newItem, ...prev].slice(0, 50)); // Keep last 50 items
-  };
+  const [brandImgFailed, setBrandImgFailed] = useState(false);
   const [genre, setGenre] = useState('mahraganat');
+  const [language, setLanguage] = useState<'ar' | 'en'>('ar');
   const [darkMode, setDarkMode] = useState(() => {
     if (typeof window !== 'undefined') {
       return window.matchMedia('(prefers-color-scheme: dark)').matches;
     }
     return true;
   });
-  const [language, setLanguage] = useState<'ar' | 'en'>('ar');
 
+  const [history, setHistory] = useState<
+    { id: string; type: string; input: string; output: string; timestamp: number }[]
+  >(() => {
+    if (typeof window !== 'undefined') {
+      try {
+        const saved = localStorage.getItem('hafiz_history');
+        return saved ? JSON.parse(saved) : [];
+      } catch {
+        return [];
+      }
+    }
+    return [];
+  });
+
+  const outputRef = useRef<HTMLDivElement>(null);
   const t = translations[language];
 
   useEffect(() => {
+    localStorage.setItem('hafiz_history', JSON.stringify(history));
+  }, [history]);
+
+  useEffect(() => {
     document.documentElement.setAttribute('data-theme', darkMode ? 'dark' : 'light');
+    document.documentElement.classList.toggle('dark', darkMode);
   }, [darkMode]);
 
   useEffect(() => {
@@ -96,28 +314,21 @@ const App = () => {
     document.documentElement.setAttribute('dir', language === 'ar' ? 'rtl' : 'ltr');
   }, [language]);
 
-  const toggleDarkMode = () => setDarkMode(!darkMode);
-  const toggleLanguage = () => setLanguage(language === 'ar' ? 'en' : 'ar');
-  
-  const recognitionRef = useRef<any>(null);
-
-  const [audioFile, setAudioFile] = useState<File | null>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const outputRef = useRef<HTMLDivElement>(null);
-
   useEffect(() => {
     if (outputResult && outputRef.current) {
-      outputRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      outputRef.current.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     }
   }, [outputResult]);
 
+  // Setup optional browser SpeechRecognition for live dictation
   useEffect(() => {
-    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    const SpeechRecognition =
+      (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
     if (SpeechRecognition) {
       recognitionRef.current = new SpeechRecognition();
       recognitionRef.current.continuous = true;
       recognitionRef.current.interimResults = true;
-      recognitionRef.current.lang = language === 'ar' ? 'ar-EG' : 'en-US'; 
+      recognitionRef.current.lang = language === 'ar' ? 'ar-EG' : 'en-US';
 
       recognitionRef.current.onresult = (event: any) => {
         let finalTranscript = '';
@@ -125,261 +336,635 @@ const App = () => {
           if (event.results[i].isFinal) finalTranscript += event.results[i][0].transcript;
         }
         if (finalTranscript) {
-          setInputText(prev => prev + (prev ? ' ' : '') + finalTranscript);
+          setInputText((prev) => prev + (prev ? ' ' : '') + finalTranscript);
         }
       };
-      recognitionRef.current.onerror = (e: any) => {
-        console.error("Mic error:", e.error);
-        setIsListening(false);
-      };
-      recognitionRef.current.onend = () => setIsListening(false);
+      recognitionRef.current.onerror = () => setIsDictatingLive(false);
+      recognitionRef.current.onend = () => setIsDictatingLive(false);
     }
+  }, [language]);
+
+  const syncSlotDrafts = (models: ModelSlotInfo[]) => {
+    const epDrafts: Record<string, string> = {};
+    const provDrafts: Record<string, ProviderType> = {};
+    const modDrafts: Record<string, string> = {};
+    const pathDrafts: Record<string, string> = {};
+    for (const m of models) {
+      epDrafts[m.id] = m.configuredEndpoint || '';
+      provDrafts[m.id] = m.providerType || 'auto';
+      modDrafts[m.id] = m.modelName || '';
+      pathDrafts[m.id] = m.selectedModelPath || '';
+    }
+    setEndpointDrafts(epDrafts);
+    setProviderDrafts(provDrafts);
+    setModelNameDrafts(modDrafts);
+    setSelectedPathDrafts(pathDrafts);
+  };
+
+  const fetchModelsStatus = async () => {
+    setIsLoadingModels(true);
+    try {
+      const res = await fetch('/api/models/status');
+      const data = await res.json();
+      if (res.ok && Array.isArray(data.models)) {
+        setModelSlots(data.models);
+        syncSlotDrafts(data.models);
+      }
+      if (res.ok && data.machine) {
+        setMachineEnv(data.machine);
+        if (typeof data.localModelsRoot === 'string') {
+          setLocalModelsRootInput(data.localModelsRoot);
+        }
+      }
+      if (res.ok && data.vramStatus) {
+        setVramStatus(data.vramStatus);
+      }
+    } catch {
+      // ignore initial background fetch errors
+    } finally {
+      setIsLoadingModels(false);
+    }
+  };
+
+  const fetchVramStatus = async () => {
+    try {
+      const res = await fetch('/api/models/vram-status');
+      const data = await res.json();
+      if (res.ok && data.vramStatus) {
+        setVramStatus(data.vramStatus);
+      }
+    } catch {
+      // ignore background poll errors
+    }
+  };
+
+  const handleUpdateVramPolicy = async (
+    updates: Partial<{
+      singleModelOnly: boolean;
+      restorePreviousModel: boolean;
+      refreshAfterMultiModel: boolean;
+      gpuMemoryLimitPercent: number;
+      minFreeVramMb: number;
+      idleUnloadSeconds: number;
+      unloadOnExit: boolean;
+    }>
+  ) => {
+    setIsUpdatingVramPolicy(true);
+    setError(null);
+    try {
+      const res = await fetch('/api/models/vram-policy', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updates),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to update VRAM policy');
+      if (data.vramStatus) setVramStatus(data.vramStatus);
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setIsUpdatingVramPolicy(false);
+    }
+  };
+
+  const handleRefreshGpuVram = async (reason = 'manual_refresh') => {
+    setIsRefreshingGpu(true);
+    setError(null);
+    try {
+      const res = await fetch('/api/models/vram-refresh', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reason, clearAllLoaded: true }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to refresh GPU VRAM');
+      if (data.vramStatus) setVramStatus(data.vramStatus);
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setIsRefreshingGpu(false);
+    }
+  };
+
+  const handleUnloadAllGpu = async (reason = 'manual') => {
+    setIsUnloadingGpu(true);
+    setError(null);
+    try {
+      const res = await fetch('/api/models/unload-all', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reason }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to unload GPU models');
+      if (data.vramStatus) setVramStatus(data.vramStatus);
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setIsUnloadingGpu(false);
+    }
+  };
+
+  const handleSetLocalModelsRoot = async () => {
+    setIsScanningDisk(true);
+    setError(null);
+    try {
+      const res = await fetch('/api/models/local-root', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ localModelsRoot: localModelsRootInput.trim() }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to scan disk folder');
+      if (Array.isArray(data.models)) {
+        setModelSlots(data.models);
+        syncSlotDrafts(data.models);
+      }
+      if (data.machine) {
+        setMachineEnv(data.machine);
+      }
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setIsScanningDisk(false);
+    }
+  };
+
+  const handleSelectSlotModel = async (slotId: string, selectedModelPath: string) => {
+    setSelectedPathDrafts((prev) => ({ ...prev, [slotId]: selectedModelPath }));
+    const nextProvider: ProviderType = selectedModelPath
+      ? selectedModelPath.toLowerCase().endsWith('.py')
+        ? 'python_cli'
+        : 'local_disk'
+      : 'auto';
+    setProviderDrafts((prev) => ({ ...prev, [slotId]: nextProvider }));
+    setSavingSlotId(slotId);
+    setError(null);
+    try {
+      const res = await fetch('/api/models/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          slotId,
+          selectedModelPath,
+          providerType: nextProvider,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to select model');
+      if (data.model) {
+        setModelSlots((prev) => prev.map((m) => (m.id === slotId ? data.model : m)));
+      }
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setSavingSlotId(null);
+    }
+  };
+
+  const handleScanLocalLlms = async () => {
+    setIsScanningLocal(true);
+    setError(null);
+    try {
+      const q = customProbeUrl.trim() ? `?customUrl=${encodeURIComponent(customProbeUrl.trim())}` : '';
+      const res = await fetch(`/api/models/discover-local${q}`);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to scan local servers');
+      if (Array.isArray(data.servers)) {
+        setLocalServers(data.servers);
+      }
+      if (data.machine) {
+        setMachineEnv(data.machine);
+      }
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setIsScanningLocal(false);
+    }
+  };
+
+  const handleApplyLocalLlmPreset = async () => {
+    setIsApplyingQuickLocal(true);
+    setError(null);
+    try {
+      const res = await fetch('/api/models/apply-local-llm', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          providerType: quickProvider,
+          endpointUrl: quickEndpoint.trim(),
+          modelName: quickModel.trim(),
+          apiKey: quickApiKey.trim(),
+          strictLocal: quickStrictLocal,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to bind Local LLM');
+      if (Array.isArray(data.models)) {
+        setModelSlots(data.models);
+        syncSlotDrafts(data.models);
+      }
+      if (data.machine) setMachineEnv(data.machine);
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setIsApplyingQuickLocal(false);
+    }
+  };
+
+  const handleToggleModelInternet = async (slotId: string, nextVal: boolean) => {
+    setSavingSlotId(slotId);
+    setError(null);
+    try {
+      const res = await fetch('/api/models/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ slotId, internetAccess: nextVal }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to update internet access');
+      if (data.model) {
+        setModelSlots((prev) => prev.map((m) => (m.id === slotId ? data.model : m)));
+      }
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setSavingSlotId(null);
+    }
+  };
+
+  const handleToggleStrictLocal = async (slotId: string, nextVal: boolean) => {
+    setSavingSlotId(slotId);
+    setError(null);
+    try {
+      const res = await fetch('/api/models/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ slotId, strictLocal: nextVal }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to update strict local setting');
+      if (data.model) {
+        setModelSlots((prev) => prev.map((m) => (m.id === slotId ? data.model : m)));
+      }
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setSavingSlotId(null);
+    }
+  };
+
+  const handleSaveModelConfig = async (slotId: string) => {
+    setSavingSlotId(slotId);
+    setError(null);
+    try {
+      const endpointUrl = (endpointDrafts[slotId] ?? '').trim();
+      const providerType = providerDrafts[slotId] ?? 'auto';
+      const modelName = (modelNameDrafts[slotId] ?? '').trim();
+      const selectedModelPath = (selectedPathDrafts[slotId] ?? '').trim();
+      const res = await fetch('/api/models/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ slotId, providerType, endpointUrl, modelName, selectedModelPath }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to update model config');
+      if (data.model) {
+        setModelSlots((prev) => prev.map((m) => (m.id === slotId ? data.model : m)));
+      }
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setSavingSlotId(null);
+    }
+  };
+
+  const handleTestModelSlot = async (slotId: string) => {
+    setTestingSlotId(slotId);
+    try {
+      const res = await fetch('/api/models/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ slotId }),
+      });
+      const data = await res.json();
+      setTestResults((prev) => ({
+        ...prev,
+        [slotId]: {
+          ok: Boolean(data.ok),
+          engine: data.engine || 'unknown',
+          latencyMs: Number(data.latencyMs || 0),
+          sampleOutput: data.sampleOutput,
+          error: data.error,
+        },
+      }));
+    } catch (err: any) {
+      setTestResults((prev) => ({
+        ...prev,
+        [slotId]: {
+          ok: false,
+          engine: 'error',
+          latencyMs: 0,
+          error: err.message || 'Test request failed',
+        },
+      }));
+    } finally {
+      setTestingSlotId(null);
+    }
+  };
+
+  useEffect(() => {
+    fetchModelsStatus();
   }, []);
 
-  const toggleListening = () => {
-    if (isListening) {
+  useEffect(() => {
+    if (!isLoading && lastEngineUsed) {
+      fetchVramStatus();
+    }
+  }, [isLoading, lastEngineUsed]);
+
+  useEffect(() => {
+    const hasLoadedModel =
+      Boolean(vramStatus?.activeLoadedModel) ||
+      Boolean(vramStatus?.pythonWorkerRunning) ||
+      (vramStatus?.ollamaLoadedModels?.length || 0) > 0;
+
+    if (activeTab !== 'models' && !hasLoadedModel) return;
+
+    const timer = setInterval(() => {
+      fetchVramStatus();
+    }, 6000);
+    return () => clearInterval(timer);
+  }, [
+    activeTab,
+    vramStatus?.activeLoadedModel,
+    vramStatus?.pythonWorkerRunning,
+    vramStatus?.ollamaLoadedModels?.length,
+  ]);
+
+  useEffect(() => {
+    const onBeforeUnload = () => {
+      if (vramStatus?.policy?.unloadOnExit !== false) {
+        const blob = new Blob([JSON.stringify({ reason: 'window_closed' })], {
+          type: 'application/json',
+        });
+        navigator.sendBeacon?.('/api/models/unload-all', blob);
+      }
+    };
+    window.addEventListener('beforeunload', onBeforeUnload);
+    return () => window.removeEventListener('beforeunload', onBeforeUnload);
+  }, [vramStatus?.policy?.unloadOnExit]);
+
+  const addToHistory = (type: string, input: string, output: string) => {
+    const newItem = {
+      id: Math.random().toString(36).slice(2, 11),
+      type,
+      input,
+      output,
+      timestamp: Date.now(),
+    };
+    setHistory((prev) => [newItem, ...prev].slice(0, 30));
+  };
+
+  const fileToBase64 = (blob: Blob) =>
+    new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.readAsDataURL(blob);
+      reader.onload = () => {
+        if (typeof reader.result === 'string') {
+          resolve(reader.result.split(',')[1]);
+        }
+      };
+      reader.onerror = reject;
+    });
+
+  // ============================================================================
+  // ASR SPEECH-TO-DIACRITIZED-TEXT (Mic Recording -> /api/models/asr)
+  // ============================================================================
+  const toggleASRRecording = async () => {
+    if (isRecordingASR) {
+      mediaRecorderRef.current?.stop();
+      setIsRecordingASR(false);
+      return;
+    }
+
+    setError(null);
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      setError(t.micError);
+      return;
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const recorder = new MediaRecorder(stream);
+      audioChunksRef.current = [];
+
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) audioChunksRef.current.push(e.data);
+      };
+
+      recorder.onstop = async () => {
+        stream.getTracks().forEach((track) => track.stop());
+        const audioBlob = new Blob(audioChunksRef.current, {
+          type: recorder.mimeType || 'audio/webm',
+        });
+        if (audioBlob.size === 0) return;
+
+        setIsLoading(true);
+        try {
+          const base64 = await fileToBase64(audioBlob);
+          const res = await fetch('/api/models/asr', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              audioBase64: base64,
+              mimeType: audioBlob.type || 'audio/webm',
+              mode: 'egyptian',
+              language,
+            }),
+          });
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.error || t.audioError);
+          if (data.text) {
+            setInputText((prev) => (prev.trim() ? `${prev.trim()}\n${data.text}` : data.text));
+          }
+        } catch (err: any) {
+          setError(err.message || t.audioError);
+        } finally {
+          setIsLoading(false);
+        }
+      };
+
+      mediaRecorderRef.current = recorder;
+      recorder.start();
+      setIsRecordingASR(true);
+    } catch {
+      setError(t.micError);
+    }
+  };
+
+  const toggleLiveDictation = () => {
+    if (isDictatingLive) {
       recognitionRef.current?.stop();
+      setIsDictatingLive(false);
     } else {
       setError(null);
       try {
         recognitionRef.current?.start();
-        setIsListening(true);
-      } catch (e) {
+        setIsDictatingLive(true);
+      } catch {
         setError(t.micError);
       }
     }
   };
 
-  const speakText = (textToSpeak: string) => {
+  // ============================================================================
+  // TTS DIACRITIC-FAITHFUL READER (/api/models/tts + Web Speech fallback)
+  // ============================================================================
+  const stopSpeaking = () => {
+    if (ttsAudioRef.current) {
+      ttsAudioRef.current.pause();
+      ttsAudioRef.current.currentTime = 0;
+    }
+    if (window.speechSynthesis) {
+      window.speechSynthesis.cancel();
+    }
+    setIsSpeaking(false);
+    setIsPaused(false);
+  };
+
+  const pauseSpeaking = () => {
+    if (ttsAudioRef.current && !ttsAudioRef.current.paused) {
+      ttsAudioRef.current.pause();
+      setIsPaused(true);
+      return;
+    }
+    if (window.speechSynthesis) {
+      window.speechSynthesis.pause();
+      setIsPaused(true);
+    }
+  };
+
+  const resumeSpeaking = () => {
+    if (ttsAudioRef.current && ttsAudioRef.current.paused && ttsAudioUrl) {
+      ttsAudioRef.current.play();
+      setIsPaused(false);
+      return;
+    }
+    if (window.speechSynthesis) {
+      window.speechSynthesis.resume();
+      setIsPaused(false);
+    }
+  };
+
+  const speakWithBrowser = (cleanText: string) => {
     if (!window.speechSynthesis) {
       setError(t.speechError);
       return;
     }
     window.speechSynthesis.cancel();
-    
-    let cleanText = textToSpeak.replace(/\[.*?\]/g, '').trim();
-
     const utterance = new SpeechSynthesisUtterance(cleanText);
-    utterance.lang = language === 'ar' ? 'ar-EG' : 'en-US'; 
-    
+    utterance.lang = language === 'ar' ? 'ar-EG' : 'en-US';
     const voices = window.speechSynthesis.getVoices();
-    const targetVoice = voices.find(v => v.lang.includes(language === 'ar' ? 'ar-EG' : 'en-US')) || voices.find(v => v.lang.includes(language));
-    if (targetVoice) {
-      utterance.voice = targetVoice;
-    }
-
-    utterance.rate = 0.85; 
-    
-    utterance.onstart = () => { setIsSpeaking(true); setIsPaused(false); };
-    utterance.onend = () => { setIsSpeaking(false); setIsPaused(false); };
-    utterance.onerror = () => { setIsSpeaking(false); setIsPaused(false); };
-    utterance.onpause = () => setIsPaused(true);
-    utterance.onresume = () => setIsPaused(false);
-
+    const targetVoice =
+      voices.find((v) => v.lang.includes(language === 'ar' ? 'ar-EG' : 'en-US')) ||
+      voices.find((v) => v.lang.includes(language));
+    if (targetVoice) utterance.voice = targetVoice;
+    utterance.rate = 0.85;
+    utterance.onstart = () => {
+      setIsSpeaking(true);
+      setIsPaused(false);
+    };
+    utterance.onend = () => {
+      setIsSpeaking(false);
+      setIsPaused(false);
+    };
+    utterance.onerror = () => {
+      setIsSpeaking(false);
+      setIsPaused(false);
+    };
     window.speechSynthesis.speak(utterance);
   };
 
-  const pauseSpeaking = () => {
-    if (window.speechSynthesis) {
-      window.speechSynthesis.pause();
-    }
-  };
+  const speakText = async (textToSpeak: string, refreshAfterPipeline = false) => {
+    if (!textToSpeak.trim()) return;
+    stopSpeaking();
+    setTtsAudioUrl(null);
+    const cleanText = textToSpeak.replace(/\[.*?\]/g, '').trim();
+    if (!cleanText) return;
 
-  const resumeSpeaking = () => {
-    if (window.speechSynthesis) {
-      window.speechSynthesis.resume();
-    }
-  };
-
-  const stopSpeaking = () => {
-    if (window.speechSynthesis) {
-      window.speechSynthesis.cancel();
-      setIsSpeaking(false);
-      setIsPaused(false);
-    }
-  };
-
-  const callAI = async (promptText: string, systemInstruction: string, useSearch = false, expectJson = false, audioData?: { data: string, mimeType: string } | { data: string, mimeType: string }[]) => {
-    const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-    let retries = 0;
-    const maxRetries = 5;
-
-    const config: any = {
-      systemInstruction: systemInstruction,
-    };
-
-    if (useSearch) {
-      config.tools = [{ googleSearch: {} }];
-    }
-    
-    if (expectJson) {
-      config.responseMimeType = "application/json";
-    }
-
-    let contents: any;
-    if (audioData) {
-      const audioParts = Array.isArray(audioData) 
-        ? audioData.map(item => ({ inlineData: { data: item.data, mimeType: item.mimeType } }))
-        : [{ inlineData: { data: audioData.data, mimeType: audioData.mimeType } }];
-      contents = [...audioParts, promptText];
-    } else {
-      contents = promptText;
-    }
-
-    while (retries < maxRetries) {
-      try {
-        const response = await ai.models.generateContent({
-          model: "gemini-3-flash-preview",
-          contents: contents,
-          config: config
-        });
-
-        if (response.text) return response.text.trim();
-      } catch (e) {
-        retries++;
-        if (retries < maxRetries) await new Promise(r => setTimeout(r, Math.pow(2, retries) * 1000));
-      }
-    }
-    throw new Error(language === 'ar' ? "فشل الاتصال بالخادم." : "Connection failed.");
-  };
-
-  const callAIAudio = async (promptText: string, modelType: 'music' | 'tts' = 'music', voiceName = 'Kore') => {
-    const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-    
-    if (modelType === 'tts') {
-      const response = await ai.models.generateContent({
-        model: "gemini-3.1-flash-tts-preview",
-        contents: [{ parts: [{ text: promptText }] }],
-        config: {
-          responseModalities: ["AUDIO"],
-          speechConfig: {
-              voiceConfig: {
-                prebuiltVoiceConfig: { voiceName },
-              },
-          },
-        },
-      });
-      const data = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-      if (data) {
-        // Convert PCM 16-bit to WAV
-        const binaryString = atob(data);
-        const pcm16Bytes = new Uint8Array(binaryString.length);
-        for (let i = 0; i < binaryString.length; i++) {
-          pcm16Bytes[i] = binaryString.charCodeAt(i);
-        }
-        
-        const sampleRate = 24000;
-        const buffer = new ArrayBuffer(44 + pcm16Bytes.length);
-        const view = new DataView(buffer);
-        
-        const writeString = (view: DataView, offset: number, str: string) => {
-          for (let i = 0; i < str.length; i++) {
-            view.setUint8(offset + i, str.charCodeAt(i));
-          }
-        };
-
-        writeString(view, 0, 'RIFF');
-        view.setUint32(4, 36 + pcm16Bytes.length, true);
-        writeString(view, 8, 'WAVE');
-        writeString(view, 12, 'fmt ');
-        view.setUint32(16, 16, true);
-        view.setUint16(20, 1, true); // PCM
-        view.setUint16(22, 1, true); // Mono
-        view.setUint32(24, sampleRate, true);
-        view.setUint32(28, sampleRate * 2, true);
-        view.setUint16(32, 2, true);
-        view.setUint16(34, 16, true);
-        writeString(view, 36, 'data');
-        view.setUint32(40, pcm16Bytes.length, true);
-
-        for (let i = 0; i < pcm16Bytes.length; i++) {
-          view.setUint8(44 + i, pcm16Bytes[i]);
-        }
-
-        const blob = new Blob([view], { type: 'audio/wav' });
-        return { audioUrl: URL.createObjectURL(blob), textResult: promptText };
-      }
-    } else {
-      const response = await ai.models.generateContentStream({
-        model: "lyria-3-clip-preview",
-        contents: promptText,
-      });
-
-      let audioBase64 = "";
-      let lyrics = "";
-      let mimeType = "audio/wav";
-
-      for await (const chunk of response) {
-        const parts = chunk.candidates?.[0]?.content?.parts;
-        if (!parts) continue;
-        for (const part of parts) {
-          if (part.inlineData?.data) {
-            if (!audioBase64 && part.inlineData.mimeType) {
-              mimeType = part.inlineData.mimeType;
-            }
-            audioBase64 += part.inlineData.data;
-          }
-          if (part.text && !lyrics) {
-            lyrics = part.text;
-          }
-        }
-      }
-
-      const binary = atob(audioBase64);
-      const bytes = new Uint8Array(binary.length);
-      for (let i = 0; i < binary.length; i++) {
-        bytes[i] = binary.charCodeAt(i);
-      }
-      const blob = new Blob([bytes], { type: mimeType });
-      return { audioUrl: URL.createObjectURL(blob), textResult: lyrics };
-    }
-    
-    throw new Error(language === 'ar' ? "فشل إنشاء الصوت." : "Failed to generate audio.");
-  };
-
-  const handleWriteLyrics = async () => {
-    if (!inputText.trim()) return;
-    setIsLoading(true); setError(null); setOutputType('lyrics_format');
-    
-    const sysPrompt = `أنت 'حَافِظ'، خبير المحتوى الغنائي المصري والمؤلف المحترف لأغاني (المهرجانات، التراب، الراب، والشعبي والمقسوم).
-مهمتك: تأليف كلمات أغنية كاملة بناءً على الفكرة أو الكلمات التي يعطيها لك المستخدم.
-مهم جداً:
-1. استخدم اللهجة المصرية العامية 100% وبطريقة طبيعية تماماً (كلمات الشارع الحقيقية بدون مبالغات أو أخطاء).
-2. إياك وتأليف كلمات ثم البحث عن أغانٍ لاستخراج كلمات منها! ألف الكلمات الأصلية من إبداعك من الصفر.
-3. لا تكتب القوافي من الأسفل للأعلى ولا تكتب بشكل معكوس، اكتب الكلمات بشكل متسلسل وطبيعي.
-4. قسم الكلمات بوضوح وضع اسم كل مقطع باللغة الإنجليزية بين أقواس مربعة هكذا: [Intro], [Verse], [Chorus], [Outro].
-5. استخدم قوافي قوية متناسبة مع السياق الذي طلبه المستخدم.
-6. أخرج فقط الكلمات كأنها مكتوبة في نوتة، بدون أي شروحات إضافية وبدون فصحى نهائياً.
-
-${PHONETIC_RULES}`;
-
+    setIsSpeaking(true);
     try {
-      const promptText = language === 'ar' ? `ألف لي كلمات أغنية مصرية عن:\n"${inputText}"\n\nمهم: اكتب بالعامية المصرية الأصلية، وابعد عن الفصحى تماماً، واكتب بشكل طبيعي ومش متكلف.` : `Write original Egyptian Arabic song lyrics about:\n"${inputText}"\n\nMake sure it is 100% colloquial Egyptian, do NOT extract from existing songs.`;
-      
-      const result = await callAI(promptText, sysPrompt, false, false);
-      setOutputResult(result);
-      addToHistory('lyrics_format', inputText.substring(0, 50) + "...", result);
-    } catch (err: any) {
-      setError(err.message);
-    } finally {
-      setIsLoading(false);
+      const res = await fetch('/api/models/tts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: cleanText, language, refreshAfterPipeline }),
+      });
+      const data = await res.json();
+      fetchVramStatus();
+      if (res.ok && data.audioUrl) {
+        setTtsAudioUrl(data.audioUrl);
+        setTimeout(() => {
+          if (ttsAudioRef.current) {
+            ttsAudioRef.current.onended = () => {
+              setIsSpeaking(false);
+              setIsPaused(false);
+            };
+            ttsAudioRef.current.play().catch(() => {
+              speakWithBrowser(cleanText);
+            });
+          }
+        }, 50);
+        return;
+      }
+      speakWithBrowser(cleanText);
+    } catch {
+      speakWithBrowser(cleanText);
     }
   };
 
-  const handleGenerateSong = async () => {
+  // ============================================================================
+  // STUDIO ACTIONS (Routed cleanly to /api/models/*)
+  // ============================================================================
+  const handleDiacriticsAction = async (
+    mode: 'smart_light' | 'phonetic_suno' | 'connected' | 'clean_standard'
+  ) => {
     if (!inputText.trim()) return;
-    setIsLoading(true); setError(null); setOutputResult(''); setOutputType('song');
+    setIsLoading(true);
+    setError(null);
+    setOutputResult('');
     setGeneratedAudioUrl(null);
-
-    const genreText = Object.entries(t.genres).find(([id]) => id === genre)?.[1] || "Pop";
+    setLastInternetUsed(false);
+    setLastSourcesChecked([]);
+    setLastEngineUsed('');
+    const nextOutputType =
+      mode === 'clean_standard'
+        ? 'clean'
+        : mode === 'smart_light'
+        ? 'light_diacritics'
+        : 'tashkeel';
+    setOutputType(nextOutputType);
 
     try {
-      const prompt = `Generate a ${genreText} song based on these lyrics/topic: ${inputText}. Ensure it has high energy and a clear rhythm.`;
-      const res = await callAIAudio(prompt, 'music');
-      
-      setOutputResult(res.textResult || (language === 'ar' ? 'تم إنشاء المقطع الموسيقي بنجاح.' : 'Music generated successfully.'));
-      setGeneratedAudioUrl(res.audioUrl);
-      addToHistory('song', inputText.substring(0, 50) + "...", res.textResult || '🎵 Audio Track');
+      const res = await fetch('/api/models/diacritics', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          text: inputText,
+          mode,
+          genderPreference,
+          language,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Error processing diacritics');
+
+      setOutputResult(data.text);
+      setLastEngineUsed(data.engine || '');
+      addToHistory(nextOutputType, inputText, data.text);
+      if (autoRead) {
+        speakText(data.text, true);
+      }
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -387,22 +972,52 @@ ${PHONETIC_RULES}`;
     }
   };
 
-  const handleTashkeelOnly = async () => {
-    if (!inputText.trim()) return;
-    setIsLoading(true); setError(null); setOutputResult(''); setOutputType('tashkeel');
+  const handleLyricsAction = async (
+    task: 'write_lyrics' | 'compose_song' | 'format_lyrics' | 'analyze_lyrics'
+  ) => {
+    const sourceText =
+      task === 'format_lyrics' || task === 'analyze_lyrics'
+        ? outputResult.trim() || inputText.trim()
+        : inputText.trim();
+    if (!sourceText) return;
 
-    const sysPrompt = `أنت 'حَافِظ'، الخبير الأول في فونوتيكا (علم أصوات) الشارع المصري. 
-    مهمتك: وضع التشكيل (الحركات) الكامل على النص ليعكس النطق العامي المصري 'الحقيقي' بدقة مذهلة. 
-    
-${PHONETIC_RULES}
-    
-    لا تغير الكلمات، فقط شكلها لتنطق مصرية 100%. أخرج النص المشكل فقط بدون أي شروحات.`;
+    setIsLoading(true);
+    setError(null);
+    setGeneratedAudioUrl(null);
+    setLastInternetUsed(false);
+    setLastSourcesChecked([]);
+    setLastEngineUsed('');
+    const nextType =
+      task === 'compose_song'
+        ? 'song'
+        : task === 'analyze_lyrics'
+        ? 'analysis'
+        : 'lyrics_format';
+    setOutputType(nextType);
+
+    const genreTitle = t.genres[genre as keyof typeof t.genres] || genre;
 
     try {
-      const result = await callAI(language === 'ar' ? `شكّل هذا النص بالعامية المصرية بدقة صوتية: "${inputText}"` : `Add diacritics to this text in Egyptian slang: "${inputText}"`, sysPrompt);
-      setOutputResult(result);
-      speakText(result);
-      addToHistory('tashkeel', inputText, result);
+      const res = await fetch('/api/models/lyrics', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          task,
+          text: sourceText,
+          genre,
+          genreTitle,
+          enableWebSearch: task === 'compose_song' ? sunoWebSearch : undefined,
+          language,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Error in songwriting task');
+
+      setOutputResult(data.text);
+      setLastEngineUsed(data.engine || '');
+      setLastInternetUsed(Boolean(data.internetConnected));
+      setLastSourcesChecked(Array.isArray(data.sourcesChecked) ? data.sourcesChecked : []);
+      addToHistory(nextType, sourceText.slice(0, 60), data.text);
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -410,238 +1025,192 @@ ${PHONETIC_RULES}
     }
   };
 
-  const handleSpellCheckAndSpeak = async () => {
-    if (!inputText.trim()) return;
-    setIsLoading(true); setError(null); setOutputResult(''); setOutputType('spellcheck');
-
-    const sysPrompt = `أنت المصحح اللغوي 'البروفيشنال' للعامية المصرية ولغة الشارع.
-    قم بتصحيح الأخطاء الإملائية مع الحفاظ الكامل على 'الروشنة' وروح العامية (لا تحولها للفصحى أبداً). 
-    إذا كانت الكلمة مكتوبة بطريقة 'سرسجة' مقبولة في الأغاني، حافظ عليها وصححها فنياً فقط.
-    
-${PHONETIC_RULES}
-
-    أخرج النص المصحح والمشكل فقط بدون أي شروحات.`;
-
-    try {
-      const result = await callAI(language === 'ar' ? `صحح هذا النص إملائياً وشكله للعامية: "${inputText}"` : `Correct spelling and add diacritics to this text: "${inputText}"`, sysPrompt);
-      setOutputResult(result);
-      speakText(result); 
-      addToHistory('spellcheck', inputText, result);
-    } catch (err: any) {
-      setError(err.message);
-    } finally {
-      setIsLoading(false);
-    }
+  const handleRemoveAllDiacritics = () => {
+    const diacriticsRegex = /[\u064B-\u065F\u0670\u0640]/g;
+    if (inputText) setInputText(inputText.replace(diacriticsRegex, ''));
+    if (outputResult) setOutputResult(outputResult.replace(diacriticsRegex, ''));
   };
 
-  const handleWordSearch = async () => {
-    if (!searchWord.trim()) return;
-    setIsSearchingWord(true); setWordSuggestions(null);
-
-    const sysPrompt = `أنت خبير لغوي في العامية المصرية واللغة العربية الفصحى.
-    المستخدم سيعطيك كلمة.
-    مهمتك: أعطني كل احتمالات التشكيل (الحركات) المختلفة لهذه الكلمة، بالإضافة إلى مرادفات (Synonyms) وأضداد (Antonyms) للكلمة بالعامية المصرية.
-    **ركز أولاً وبشكل أساسي على معانيها ونطقها في العامية المصرية أو الدارجة**، ثم اذكر معانيها ونطقها في الفصحى إذا كان لها استخدام مختلف.
-    أخرج النتيجة بصيغة JSON فقط كالتالي:
-    {
-      "suggestions": [
-        {"word": "الكلمة_بالتشكيل", "meaning": "معنى هذا التشكيل (مصري أو فصحى) ومتى يستخدم باختصار"}
-      ],
-      "synonyms": ["مرادف1", "مرادف2"],
-      "antonyms": ["ضد1", "ضد2"]
-    }`;
+  const handleWordSearch = async (overrideWord?: string) => {
+    const targetWord = (overrideWord ?? searchWord).trim();
+    if (!targetWord) return;
+    setIsSearchingWord(true);
+    setWordSuggestions(null);
 
     try {
-      const result = await callAI(language === 'ar' ? `هات كل احتمالات التشكيل للكلمة دي: "${searchWord}"` : `Get all diacritics for this word: "${searchWord}"`, sysPrompt, false, true);
-      const parsedData = JSON.parse(result.replace(/^```json\n|\n```$/g, ''));
-      setWordSuggestions(parsedData);
-      addToHistory('search', searchWord, result);
-    } catch (err: any) {
-      setWordSuggestions({ suggestions: [{ word: language === 'ar' ? "خطأ" : "Error", meaning: language === 'ar' ? "حدث خطأ أثناء جلب التشكيلات، حاول مجدداً." : "Error fetching diacritics, try again." }] });
+      const res = await fetch('/api/models/diacritics-search', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ word: targetWord, language }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Search error');
+      setWordSuggestions(data);
+      addToHistory('search', targetWord, JSON.stringify(data.suggestions || []));
+    } catch {
+      setWordSuggestions({
+        suggestions: [
+          {
+            word: language === 'ar' ? 'تعذر البحث' : 'Search Failed',
+            meaning:
+              language === 'ar'
+                ? 'حدث خطأ أثناء جلب التشكيلات، حاول مجدداً.'
+                : 'Error fetching diacritics, please try again.',
+          },
+        ],
+      });
     } finally {
       setIsSearchingWord(false);
     }
   };
 
+  const handleFindRhymes = async () => {
+    if (!rhymeWord.trim()) return;
+    setIsLoading(true);
+    setError(null);
+    setLastEngineUsed('');
+    setLastInternetUsed(false);
+    setLastSourcesChecked([]);
+    setOutputType('rhymes');
+
+    try {
+      const res = await fetch('/api/models/rhymes', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ word: rhymeWord, language }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Error finding rhymes');
+
+      const formatted =
+        language === 'ar'
+          ? `القوافي المقترحة لـ "${rhymeWord}":\n${(data.rhymes || []).join('\n')}`
+          : `Suggested rhymes for "${rhymeWord}":\n${(data.rhymes || []).join('\n')}`;
+      setOutputResult(formatted);
+      setLastEngineUsed(data.engine || '');
+      addToHistory('rhymes', rhymeWord, formatted);
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleRewriteLine = async () => {
+    if (!lineToRewrite.trim()) return;
+    setIsLoading(true);
+    setError(null);
+    setLastEngineUsed('');
+    setLastInternetUsed(false);
+    setLastSourcesChecked([]);
+    setOutputType('rewrite');
+
+    try {
+      const res = await fetch('/api/models/rewrite', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ line: lineToRewrite, context: inputText, language }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Error rewriting line');
+
+      const formatted =
+        language === 'ar' ? `السطر الجديد:\n${data.text}` : `Rewritten line:\n${data.text}`;
+      setOutputResult(formatted);
+      setLastEngineUsed(data.engine || '');
+      addToHistory('rewrite', lineToRewrite, formatted);
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
   const handleGenerateMusicPrompt = async () => {
     if (!sunoGenre.trim() || !sunoMood.trim()) {
-      setError(language === 'ar' ? 'الرجاء اختيار نوع الموسيقى وكتابة الحالة.' : 'Please select genre and write mood.');
+      setError(
+        language === 'ar'
+          ? 'الرجاء اختيار نوع الموسيقى وكتابة الحالة.'
+          : 'Please select genre and write mood.'
+      );
       return;
     }
     setShowSunoModal(false);
-    setIsLoading(true); setError(null); setOutputResult(''); setOutputType('music_prompt');
-
-    const sysPrompt = `أنت خبير في هندسة البرومبتات (Prompt Engineering) لأدوات توليد الموسيقى بالذكاء الاصطناعي مثل Suno AI و Udio.
-    مهمتك: تحويل فكرة المستخدم و/أو كلماته إلى برومبت إنجليزي تقني دقيق.
-    
-    النوع الموسيقي المطلوب (Genre): ${sunoGenre}
-    الحالة أو الكلمات (Mood/Context): ${sunoMood}
-    ${inputText.trim() ? `كلمات الأغنية (Lyrics):\n${inputText.trim()}` : ''}
-    
-    يجب أن يتضمن البرومبت:
-    1. [Style]: وصف دقيق للنمط.
-    2. [Instruments]: الآلات المناسبة لهذا النوع.
-    3. [Vocal Style]: أسلوب الغناء.
-    4. [Atmosphere]: الجو العام.
-    
-    أخرج النتيجة كبرومبت جاهز للنسخ واللصق في Suno/Udio (بالإنجليزية). أضف شرحاً بسيطاً بالعربية لما يفعله هذا البرومبت.`;
+    setIsLoading(true);
+    setError(null);
+    setOutputResult('');
+    setLastInternetUsed(false);
+    setLastSourcesChecked([]);
+    setLastEngineUsed('');
+    setOutputType('music_prompt');
 
     try {
-      const result = await callAI("أكتب لي برومبت Suno احترافي بناءً على المعطيات", sysPrompt);
-      setOutputResult(result);
-      addToHistory('music_prompt', `Genre: ${sunoGenre}, Mood: ${sunoMood}`, result);
-    } catch (err: any) {
-      setError(err.message);
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  const handleFormatLyrics = async () => {
-    const textToAnalyze = outputResult.trim() || inputText.trim();
-    if (!textToAnalyze) return;
-    setIsLoading(true); setError(null); setOutputType('lyrics_format');
-
-    const sysPrompt = `أنت شاعر ومنسق أغاني محترف.
-    مهمتك: أخذ الكلمات التي يعطيها لك المستخدم وتقسيمها وتنسيقها بشكل احترافي لتكون جاهزة للغناء أو لهندسة الصوت (Suno AI وغيره).
-    قم بتقسيم الأغنية إلى مقاطع واضحة باستخدام الهيكل التالي باللغة الإنجليزية كمؤشرات بين الأقواس المربعة:
-    [Intro]
-    [Verse 1]
-    [Pre-Chorus] (إذا لزم الأمر)
-    [Chorus]
-    [Verse 2]
-    [Chorus 2]
-    [Bridge] (إذا لزم الأمر)
-    [Outro]
-    
-    حافظ على الكلمات الأصلية بقدر الإمكان ولكن قسمها بشكل منطقي وموزون.`;
-
-    try {
-      const result = await callAI(textToAnalyze, sysPrompt);
-      setOutputResult(result);
-      addToHistory('lyrics_format', textToAnalyze.substring(0, 50) + "...", result);
-    } catch (err: any) {
-      setError(err.message);
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  const handleVoiceClone = async () => {
-    if (!voiceFile || !targetAudioFile) {
-      setError(language === 'ar' ? "يرجى رفع عينة صوت الشخص وعينة اللحن/الأداء." : "Please upload both the voice sample and the target performance sample.");
-      return;
-    }
-    
-    setShowVoiceCloneModal(false);
-    setIsLoading(true); setError(null); setOutputResult(''); 
-    setOutputType('voice_clone');
-    setSynthesisStep(1);
-    setGeneratedAudioUrl(null);
-
-    try {
-      const getBase64 = (file: File) => new Promise<string>((resolve, reject) => {
-        const reader = new FileReader();
-        reader.readAsDataURL(file);
-        reader.onload = () => {
-          if (typeof reader.result === 'string') resolve(reader.result.split(',')[1]);
-        };
-        reader.onerror = reject;
+      const res = await fetch('/api/models/prompt', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          genre: sunoGenre,
+          mood: sunoMood,
+          lyrics: inputText,
+          enableWebSearch: sunoWebSearch,
+          language,
+        }),
       });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Error generating prompt');
 
-      const sourceVoiceData = await getBase64(voiceFile);
-      setSynthesisStep(2);
-      const targetMelodyData = await getBase64(targetAudioFile);
-      setSynthesisStep(3);
-
-      const sysPrompt = `[INTERNAL SYSTEM MODE: HAFIZ PRO SYNTHESIS ENGINE]
-      [CORE GOAL: 100% RECONSTRUCTION OF VOCAL TIMBRE FROM SOURCE INTO TARGET MELODY]
-
-      أنت الآن لا تقترح برومبتات، بل أنت 'خوارزمية الرندرة' (The Rendering Algorithm).
-      يجب أن تقرر بدقة جراحية كيف سيندمج الملفان الصبيان.
-
-      الملف الأول (Source DNA): الترددات، البحة، خامة الصوت.
-      الملف الثاني (Melody Structure): السلم الموسيقي، العرب الغنائية، النفس.
-
-      استخرج تقرير:
-      🧬 [المعالم الصوتية المنسوخة]: تحليل الصوت
-      🎹 [الخريطة اللحنية المتبعة]: تحليل اللحن
-      🎙️ [Vocal Output Log]: عرض الكلمات مع تطبيق الأداء
-      
-      اكتب التقرير النهائي باللغتين العربية والإنجليزية.
-      `;
-
-      const targetTextToSpeak = cloneTargetText || "Test voice cloning successful!";
-
-      // Generate the text report
-      const resText = await callAI(
-        `قم بإجراء الرندرة الصوتية الكاملة. الكلمات المستهدفة: "${targetTextToSpeak}"`, 
-        sysPrompt, 
-        false, 
-        false, 
-        [
-          { data: sourceVoiceData, mimeType: voiceFile.type },
-          { data: targetMelodyData, mimeType: targetAudioFile.type }
-        ]
-      );
-      
-      setSynthesisStep(4);
-      
-      // Generate the placeholder audio
-      const res = await callAIAudio(targetTextToSpeak, 'tts');
-      
-      setOutputResult(resText);
-      setGeneratedAudioUrl(res.audioUrl);
-      addToHistory('voice_clone', `${voiceFile.name} -> ${targetAudioFile.name}`, resText);
+      setOutputResult(data.text);
+      setLastEngineUsed(data.engine || '');
+      setLastInternetUsed(Boolean(data.internetConnected));
+      setLastSourcesChecked(Array.isArray(data.sourcesChecked) ? data.sourcesChecked : []);
+      addToHistory('music_prompt', `${sunoGenre} · ${sunoMood}`, data.text);
     } catch (err: any) {
-      setError(err.message || t.audioError);
+      setError(err.message);
     } finally {
       setIsLoading(false);
-      setSynthesisStep(0);
     }
   };
 
-  const downloadResult = () => {
-    if (generatedAudioUrl) {
-      const a = document.createElement('a');
-      a.href = generatedAudioUrl;
-      a.download = `hafiz-audio-${Date.now()}.wav`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      return;
-    }
+  const handleRunWebAgent = async () => {
+    const targetInput = webAgentMode === 'url' ? webAgentUrl.trim() : webAgentQuery.trim();
+    if (!targetInput) return;
 
-    if (!outputResult) return;
-    const blob = new Blob([outputResult], { type: 'text/plain' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `hafiz-synthesis-${Date.now()}.txt`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-  };
-
-  const handleAnalyzeLyrics = async () => {
-    const textToAnalyze = outputResult.trim() || inputText.trim();
-    if (!textToAnalyze) return;
-    setIsLoading(true); setError(null); setOutputType('analysis');
-
-    const sysPrompt = `أنت خبير موسيقي ومنتج فني (A&R) متخصص في الموسيقى المصرية الحديثة.
-    مهمتك هي تحليل الكلمات المعطاة واقتراح أفضل ستايل موسيقي يليق بها، مع كتابة برومبت Suno AI احترافي.
-    
-    1. حلل 'مود' الكلمات (حزين، فرح، فخر، رقص، سرسجة، إلخ).
-    2. اقترح 3 أنواع موسيقية مصرية تليق على الكلام (مثلاً: مهرجان مقسوم، تراب شعبي هادي، راب أولد سكول).
-    3. اكتب برومبت Suno AI إنجليزي 'جبار' يجمع بين الروح المصرية والتقنيات العالمية.
-    
-    أخرج النتيجة بتنسيق واضح ومنظم باللغة العربية، مع جعل البرومبت بالإنجليزية.`;
+    setIsLoading(true);
+    setError(null);
+    setOutputResult('');
+    setWebSearchHits([]);
+    setLastInternetUsed(false);
+    setLastSourcesChecked([]);
+    setLastEngineUsed('');
+    setOutputType(webAgentTask === 'analyze_and_prompt' ? 'music_prompt' : 'lyrics_format');
 
     try {
-      const result = await callAI(textToAnalyze, sysPrompt);
-      setOutputResult(result);
-      addToHistory('analysis', textToAnalyze.substring(0, 50) + "...", result);
+      const res = await fetch('/api/models/web-agent', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          mode: webAgentMode,
+          url: webAgentMode === 'url' ? targetInput : '',
+          query: webAgentMode === 'search' ? targetInput : '',
+          task: webAgentTask,
+          customInstruction: webAgentCustomInstruction.trim(),
+          language,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Error running web agent');
+
+      setOutputResult(data.text || '');
+      setLastEngineUsed(data.engine || '');
+      const hits = Array.isArray(data.searchHits) ? data.searchHits : [];
+      setWebSearchHits(hits);
+      setLastInternetUsed(true);
+      setLastSourcesChecked(
+        data.fetchedPage?.url
+          ? [data.fetchedPage.url]
+          : hits.slice(0, 3).map((h: any) => h.url).filter(Boolean)
+      );
+      addToHistory('web_agent', targetInput.slice(0, 60), data.text || '');
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -651,140 +1220,38 @@ ${PHONETIC_RULES}
 
   const handleAudioUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
-      const file = e.target.files[0];
-      setAudioFile(file);
-      setIsUploadSuccess(false);
-      setUploadProgress(0);
-      
-      // Simulate upload progress
-      let progress = 0;
-      const interval = setInterval(() => {
-        progress += 10;
-        setUploadProgress(progress);
-        if (progress >= 100) {
-          clearInterval(interval);
-          setIsUploadSuccess(true);
-        }
-      }, 100);
+      setAudioFile(e.target.files[0]);
     }
   };
 
-  const [rhymeWord, setRhymeWord] = useState('');
-  const [lineToRewrite, setLineToRewrite] = useState('');
-
-  const handleFindRhymes = async () => {
-    if (!rhymeWord.trim()) return;
-    setIsLoading(true); setError(null);
-    
-    const sysPrompt = `أنت شاعر مصري وشبّيح قوافي، خبير في القوافي الشعرية للعامية المصرية الموزونة.
-    مهمتك: أعطني قائمة بكلمات مصرية عامية (نفس لغة الشارع والمهرجانات والراب) لها نفس وزن وقافية الكلمة التي يعطيها المستخدم.
-    الشروط:
-    1. الكلمات لازم تكون عامية مصرية 100% (بدون فصحى معقدة).
-    2. القافية لازم تكون مطابقة تماماً، ونفس عدد المقاطع الصوتية (الوزن الموسيقي) يكون متقارب جداً ميكسرش اللحن.
-    أخرج النتيجة بصيغة JSON فقط كالتالي:
-    {
-      "rhymes": ["كلمة1", "كلمة2", "كلمة3", "كلمة4", "كلمة5"]
-    }
-
-${PHONETIC_RULES}`;
-
-    try {
-      const result = await callAI(language === 'ar' ? `هات كلمات عامية مصرية لها نفس القافية والوزن لكلمة: "${rhymeWord}"` : `Get Egyptian colloquial words with the exact same rhyme and meter for: "${rhymeWord}"`, sysPrompt, false, true);
-      const parsedData = JSON.parse(result.replace(/^```json\n|\n```$/g, ''));
-      setOutputResult(language === 'ar' ? `القوافي المقترحة لـ "${rhymeWord}":\n${parsedData.rhymes.join('\n')}` : `Suggested rhymes for "${rhymeWord}":\n${parsedData.rhymes.join('\n')}`);
-      setOutputType('rhymes');
-    } catch (err: any) {
-      setError(language === 'ar' ? "حدث خطأ أثناء البحث عن القوافي." : "Error finding rhymes.");
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  const handleRewriteLine = async () => {
-    if (!lineToRewrite.trim()) return;
-    setIsLoading(true); setError(null);
-    
-    const sysPrompt = `أنت شاعر حقيقي و"صنايعي وكتاب أغاني محترف" للأغاني المصرية (مهرجانات، شعبي، راب، تراب).
-    مهمتك: إعادة صياغة وكتابة السطر الذي يعطيه لك المستخدم، ليكون أقوى وأكثر جاذبية.
-    الشروط الصارمة:
-    1. نفس القافية: يجب أن ينتهي السطر الجديد بنفس القافية (نفس الحرفين الأخيرين).
-    2. نفس الوزن (الرتم): يجب أن يكون السطر الجديد نفس الطول الموسيقي وتفعيلات السطر القديم تماماً.
-    3. العامية المصرية الأصيلة: إياك واستخدام الفصحى أو الكلمات المتقعرة. استخدم مصطلحات الشارع المصري، السرسجة (إن لزم)، والكلام الطبيعي المتداول.
-    4. أخرج السطر الجديد فقط دون أي مقدمات أو شروحات.
-
-${PHONETIC_RULES}`;
-    try {
-      const prompt = inputText.trim() 
-        ? (language === 'ar' ? `أعد صياغة هذا السطر مع الحفاظ الصارم على وزنه وقافيته بالعامية المصرية: "${lineToRewrite}"\n\nالسياق العام للأغنية (عشان المعنى يكون لايق): "${inputText}"` : `Rewrite this line keeping exact same meter and rhyme in Egyptian Arabic: "${lineToRewrite}"\n\nContext of the song: "${inputText}"`)
-        : (language === 'ar' ? `أعد صياغة هذا السطر مع الحفاظ الصارم على وزنه وقافيته بالعامية المصرية: "${lineToRewrite}"` : `Rewrite this line keeping exact same meter and rhyme in Egyptian Arabic: "${lineToRewrite}"`);
-        
-      const result = await callAI(prompt, sysPrompt);
-      setOutputResult(language === 'ar' ? `السطر الجديد:\n${result}` : `New line:\n${result}`);
-      setOutputType('rewrite');
-    } catch (err: any) {
-      setError(language === 'ar' ? "حدث خطأ أثناء إعادة صياغة السطر." : "Error rewriting line.");
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  const processAudio = async (mode: 'general' | 'egyptian' | 'analyze_music') => {
+  const processAudioASR = async (mode: 'general' | 'egyptian' | 'clean_standard') => {
     if (!audioFile) return;
-    setIsLoading(true); setError(null); setOutputResult(''); 
-    setOutputType(mode === 'analyze_music' ? 'analysis' : 'transcription');
+    setIsLoading(true);
+    setError(null);
+    setOutputResult('');
+    setLastEngineUsed('');
+    setLastInternetUsed(false);
+    setLastSourcesChecked([]);
+    setOutputType('transcription');
 
     try {
-      const base64Data = await new Promise<string>((resolve, reject) => {
-        const reader = new FileReader();
-        reader.readAsDataURL(audioFile);
-        reader.onload = () => {
-          if (typeof reader.result === 'string') {
-            resolve(reader.result.split(',')[1]);
-          }
-        };
-        reader.onerror = reject;
+      const audioBase64 = await fileToBase64(audioFile);
+      const res = await fetch('/api/models/asr', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          audioBase64,
+          mimeType: audioFile.type || 'audio/mpeg',
+          mode,
+          language,
+        }),
       });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || t.audioError);
 
-      const audioPart = { data: base64Data, mimeType: audioFile.type };
-
-      let sysPrompt = "";
-      let promptText = "";
-
-      if (mode === 'egyptian') {
-        sysPrompt = `أنت 'حَافِظ'، الخبير الأول والبروفيسور في تحليل وتفريغ اللهجة المصرية العامية الحية (خصوصاً لغة الشارع، المهرجانات، والراب).
-        مهمتك: استمع بدقة شديدة للملف الصوتي، وفرغ الكلام بالعامية المصرية كما ينطق تماماً (حتى لو كانت كلمات 'سرسجة' أو مصطلحات تقنية موسيقية أو 'إيفيهات' دارجة).
-        
-${PHONETIC_RULES}
-
-        إذا كان هناك 'أديبس' (Ad-libs) أو أصوات خلفية مميزة، اذكرها بين قوسين.
-        في تنسيق مقاطع الأغاني، يجب وضع أسماء المقاطع بين الأقواس المربعة [ ] هكذا: [Intro], [Verse 1], [Chorus], [Outro].
-        أخرج النص المفرغ والمشكل فقط باحترافية تامة.`;
-        promptText = "قم بتفريغ هذا الصوت واكتبه بالعامية المصرية الأصلية مع التشكيل الدقيق جداً.";
-      } else if (mode === 'analyze_music') {
-        sysPrompt = `أنت منتج موسيقي وخبير (A&R) متخصص في جميع أنواع الموسيقى.
-        مهمتك هي تحليل المقطع الصوتي المرفق بدقة تقنية عالية جداً:
-        1. تفريغ الكلمات بدقة، وفي تنسيق الكلمات تأكد من تقسيمها ووضع أسماء المقاطع بين الأقواس المربعة [ ] هكذا: [Intro], [Verse], [Chorus].
-        2. تحديد النوع الموسيقي بدقة (الجنر).
-        3. تحليل 'الوايب' (Vibe)، الآلات المستخدمة، وسرعة الإيقاع (BPM).
-        4. عمل تحليل في صيغة برومبت لموقع سونو (Suno AI) باللغة الإنجليزية. **يجب** أن يكون البرومبت مكونًا من حوالي 1000 حرف (مع حساب المسافات والنقاط في الكاركترز)، ويجب أن يصف الأغنية بالتفصيل الممل من حيث الجو والآلات والأسلوب الصوتي ليقوم Suno بعمل توليد دقيق لنفس الروح.
-        
-        أخرج النتيجة بتنسيق واضح ومقسم إلى:
-        - الكلمات المفرغة
-        - التحليل الموسيقي التقني
-        - [Suno Prompt: اكتب البرومبت الإنجليزي الطويل والمفصل هنا]`;
-        promptText = "حلل المقطع ده باحترافية، واكتب كلماته، واعمل لي برومبت Suno دقيق جداً مكون من 1000 حرف بيشرح المزيكا دي اتعملت ازاي.";
-      } else {
-        sysPrompt = `أنت خبير في تفريغ الصوتيات بجميع اللغات واللهجات.
-        مهمتك: استمع للملف الصوتي، تعرف على لغته أو لهجته، واكتب الكلام بدقة إملائية.
-        ثم ضع التشكيل المناسب حسب لغة الأغنية أو المقطع الصوتي.
-        إذا كان المقطع الصوتي أغنية، قسم الكلمات وضع أسماء المقاطع بين الأقواس المربعة [ ] هكذا: [Intro], [Verse], [Chorus].
-        أخرج النص المفرغ والمشكل فقط.`;
-        promptText = "قم بتفريغ هذا الصوت واكتبه مع التشكيل المناسب للغته.";
-      }
-
-      const result = await callAI(promptText, sysPrompt, false, false, audioPart);
-      setOutputResult(result);
-      addToHistory(mode, audioFile.name, result);
+      setOutputResult(data.text);
+      setLastEngineUsed(data.engine || '');
+      addToHistory(mode, audioFile.name, data.text);
     } catch (err: any) {
       setError(err.message || t.audioError);
     } finally {
@@ -792,65 +1259,34 @@ ${PHONETIC_RULES}
     }
   };
 
-  const handleDeepMusicAnalysis = async () => {
+  const handleAudioMusicAnalysis = async (mode: 'suno_1000' | 'deep_analysis') => {
     if (!audioFile && !youtubeLink.trim()) return;
-    setIsLoading(true); setError(null); setOutputResult(''); 
+    setIsLoading(true);
+    setError(null);
+    setOutputResult('');
+    setLastEngineUsed('');
+    setLastInternetUsed(false);
+    setLastSourcesChecked([]);
     setOutputType('analysis');
 
     try {
-      let targetName = "";
-      
-      if (audioFile) {
-        // Analyze uploaded audio locally via frontend AI call
-        const base64Data = await new Promise<string>((resolve, reject) => {
-          const reader = new FileReader();
-          reader.readAsDataURL(audioFile);
-          reader.onload = () => {
-            if (typeof reader.result === 'string') resolve(reader.result.split(',')[1]);
-          };
-          reader.onerror = reject;
-        });
-        const audioPart = { data: base64Data, mimeType: audioFile.type };
-        targetName = audioFile.name;
+      const audioBase64 = audioFile ? await fileToBase64(audioFile) : undefined;
+      const res = await fetch('/api/models/audio-analyze', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          audioBase64,
+          mimeType: audioFile?.type,
+          youtubeUrl: !audioBase64 ? youtubeLink.trim() : undefined,
+          mode,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || t.audioError);
 
-        const sysPrompt = `أنت مهندس صوت ومنتج موسيقي وموزع عالمي وباحث موسيقي محترف جداً بخصائص الذكاء الاصطناعي الفائق.
-مهمتك: قم بتحليل هذا المقطع الصوتي المرفق بأقصى دقة ممكنة بالاعتماد على التحليل السمعي الفعلي للملف.
-المطلوب منك تحليل وتفكيك موسيقي شامل جداً:
-1. تصنيف النوع الموسيقي بدقة عالية (Exact Genre / Sub-genre).
-2. الروح والحالة العامة للتراك (Vibe/Mood/Atmosphere).
-3. وصف فني دقيق للتركيبة والتوزيع: كيف تم صناعة هذا الإيقاع والأسلوب، وما هي الآلات الموسيقية (Instruments) ونوع الـ Synthesizers إذا وُجدت، وكيفية إعداد الـ (Drums/Bass).
-4. استنتاج وتحديد المقام (Maqam) أو السلم الموسيقي (Scale)، وتوضيح سرعة الإيقاع (Tempo/BPM) المرجح.
-5. استخراج "برومبت إنجليزي فائق الدقة" (Highly Detailed AI Music Prompt) صالح للاستخدام في Suno AI أو Udio لتوليد موسيقى مشابهة تماماً، مع تقديم شرح وتعقيب باللغة العربية حول سبب اختيار هذا البرومبت وكيف يمكن للمستخدم استغلاله.
-6. تقديم أمثلة ومقترحات حقيقية دقيقة جداً لأغاني أو تراكات أخرى مشابهة نفس الستايل على يوتيوب بالاسم الدقيق (Exact names and artists).
-
-تأكد من عدم تقليل الجودة وأن تكون إجاباتك مفصلة وتشع بالخبرة والأذن الموسيقية الدقيقة.`;
-
-        const promptText = "أعطني تحليلاً وتفكيكاً موسيقياً شاملاً ودقيقاً للغاية لهذا المقطع الصوتي، وضع ببالك كل نقطة تم طلبها.";
-        const result = await callAI(promptText, sysPrompt, false, false, audioPart);
-        
-        setOutputResult(result);
-        addToHistory('analysis', targetName, result);
-      } else if (youtubeLink.trim()) {
-        // Call backend API to download audio and analyze it correctly without hallucination
-        targetName = youtubeLink;
-        const res = await fetch('/api/analyze-youtube', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({ url: youtubeLink })
-        });
-        
-        const data = await res.json();
-        
-        if (!res.ok) {
-          throw new Error(data.error || "Failed to analyze YouTube video");
-        }
-        
-        setOutputResult(data.result);
-        addToHistory('analysis', targetName, data.result);
-      }
-
+      setOutputResult(data.result);
+      setLastEngineUsed(data.engine || '');
+      addToHistory('analysis', audioFile?.name || youtubeLink, data.result);
     } catch (err: any) {
       setError(err.message || t.audioError);
     } finally {
@@ -858,24 +1294,82 @@ ${PHONETIC_RULES}
     }
   };
 
+  const handleVoiceClone = async () => {
+    if (!voiceFile || !targetAudioFile) {
+      setError(
+        language === 'ar'
+          ? 'يرجى رفع عينة صوت الشخص وعينة اللحن/الأداء.'
+          : 'Please upload both voice and melody samples.'
+      );
+      return;
+    }
+
+    setShowVoiceCloneModal(false);
+    setIsLoading(true);
+    setError(null);
+    setOutputResult('');
+    setLastEngineUsed('');
+    setLastInternetUsed(false);
+    setLastSourcesChecked([]);
+    setOutputType('voice_clone');
+    setGeneratedAudioUrl(null);
+
+    try {
+      const sourceVoiceData = await fileToBase64(voiceFile);
+      const targetMelodyData = await fileToBase64(targetAudioFile);
+
+      const res = await fetch('/api/models/voice-clone', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sourceAudio: { data: sourceVoiceData, mimeType: voiceFile.type },
+          targetAudio: { data: targetMelodyData, mimeType: targetAudioFile.type },
+          lyrics: cloneTargetText || '',
+          language,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || t.audioError);
+
+      setOutputResult(data.text);
+      setGeneratedAudioUrl(data.audioUrl || null);
+      setLastEngineUsed(data.engine || '');
+      addToHistory('voice_clone', `${voiceFile.name} → ${targetAudioFile.name}`, data.text);
+    } catch (err: any) {
+      setError(err.message || t.audioError);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // ============================================================================
+  // UTILITY HANDLERS
+  // ============================================================================
   const copyToClipboard = () => {
     if (!outputResult) return;
-    const textArea = document.createElement("textarea");
-    textArea.value = outputResult;
-    document.body.appendChild(textArea);
-    textArea.select();
-    try {
-      document.execCommand('copy');
-      setCopyStatus(true);
-      setTimeout(() => setCopyStatus(false), 2000);
-    } catch (err) {}
-    document.body.removeChild(textArea);
+    navigator.clipboard?.writeText(outputResult).then(
+      () => {
+        setCopyStatus(true);
+        setTimeout(() => setCopyStatus(false), 2000);
+      },
+      () => {
+        const textArea = document.createElement('textarea');
+        textArea.value = outputResult;
+        document.body.appendChild(textArea);
+        textArea.select();
+        try {
+          document.execCommand('copy');
+          setCopyStatus(true);
+          setTimeout(() => setCopyStatus(false), 2000);
+        } catch {
+          // ignore
+        }
+        document.body.removeChild(textArea);
+      }
+    );
   };
 
-  const saveInput = () => {
-    localStorage.setItem('rika_saved_input', inputText);
-  };
-
+  const saveInput = () => localStorage.setItem('rika_saved_input', inputText);
   const loadInput = () => {
     const saved = localStorage.getItem('rika_saved_input');
     if (saved) setInputText(saved);
@@ -887,7 +1381,7 @@ ${PHONETIC_RULES}
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `rika_output_${Date.now()}.txt`;
+    a.download = `hafiz_output_${Date.now()}.txt`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -900,30 +1394,41 @@ ${PHONETIC_RULES}
       sections: [
         {
           properties: {},
-          children: outputResult.split('\n').map(line => new Paragraph({
-            children: [
-              new TextRun({
-                text: line,
-                rightToLeft: true,
+          children: outputResult.split('\n').map(
+            (line) =>
+              new Paragraph({
+                children: [new TextRun({ text: line, rightToLeft: language === 'ar' })],
               })
-            ],
-          })),
+          ),
         },
       ],
     });
-
     const blob = await Packer.toBlob(doc);
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `rika_output_${Date.now()}.docx`;
+    a.download = `hafiz_output_${Date.now()}.docx`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
   };
 
-  const VirtualizedOutput = ({ text, type }: { text: string, type: string }) => {
+  const downloadResultPackage = () => {
+    if (generatedAudioUrl) {
+      const a = document.createElement('a');
+      a.href = generatedAudioUrl;
+      a.download = `hafiz-audio-${Date.now()}.wav`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      return;
+    }
+    downloadOutput();
+  };
+
+  // Virtualized Output Renderer
+  const VirtualizedOutput = ({ text, type }: { text: string; type: string }) => {
     const parentRef = useRef<HTMLDivElement>(null);
     const lines = text.split('\n');
 
@@ -934,10 +1439,7 @@ ${PHONETIC_RULES}
     });
 
     return (
-      <div 
-        ref={parentRef} 
-        className="max-h-[60vh] overflow-y-auto pr-2 custom-scrollbar"
-      >
+      <div ref={parentRef} className="max-h-[56vh] overflow-y-auto pe-2 custom-scrollbar">
         <div
           style={{
             height: `${rowVirtualizer.getTotalSize()}px`,
@@ -948,28 +1450,50 @@ ${PHONETIC_RULES}
           {rowVirtualizer.getVirtualItems().map((virtualRow) => {
             const line = lines[virtualRow.index];
             let content: React.ReactNode = line;
-            
-            if (type === 'song') {
+
+            if (type === 'song' || type === 'lyrics_format') {
               if (line.match(/^\[Style:.*\]|^\[Vocal Delivery:.*\]|^\[Pronunciation.*\]/i)) {
-                content = <span className="block text-[#00ffcc] font-mono text-xs mt-1 mb-1 bg-[#00ffcc]/10 p-1.5 rounded-md w-fit" dir="ltr">{line}</span>;
+                content = (
+                  <span
+                    className="block font-mono text-xs my-1.5 bg-indigo-50 dark:bg-indigo-950/50 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800/60 px-2.5 py-1.5 rounded-lg w-fit"
+                    dir="ltr"
+                  >
+                    {line}
+                  </span>
+                );
               } else if (line.match(/^\[(.*?)\]$/)) {
-                content = <span className={`block ${darkMode ? 'text-indigo-400 bg-indigo-900/30' : 'text-indigo-700 bg-indigo-100'} font-black mt-6 mb-2 text-sm tracking-widest uppercase w-fit px-2 py-1 rounded`}>{line}</span>;
+                content = (
+                  <span className="inline-block text-xs font-bold tracking-wider uppercase text-indigo-600 dark:text-indigo-400 mt-4 mb-1">
+                    {line}
+                  </span>
+                );
               } else if (line.trim() === '') {
                 content = <br />;
               } else {
-                content = <span className={`block mb-1 ${darkMode ? 'text-slate-100' : 'text-slate-800'}`}>{line}</span>;
+                content = <span className="block mb-1 text-slate-900 dark:text-slate-100">{line}</span>;
               }
             } else if (type === 'music_prompt' || type === 'analysis') {
               if (line.match(/\[(.*?)\]/)) {
-                content = <span className="block text-amber-400 font-mono text-sm mt-2 mb-1 bg-amber-400/10 p-2 rounded-md border border-amber-400/20" dir="ltr">{line}</span>;
+                content = (
+                  <span
+                    className="block font-mono text-xs my-1.5 bg-slate-100 dark:bg-slate-800/80 text-slate-800 dark:text-slate-200 border border-slate-200 dark:border-slate-700 px-3 py-2 rounded-lg"
+                    dir="ltr"
+                  >
+                    {line}
+                  </span>
+                );
               } else if (line.trim() === '') {
                 content = <br />;
               } else {
-                content = <span className={`block mb-1 ${darkMode ? 'text-slate-100' : 'text-slate-800'}`}>{line}</span>;
+                content = <span className="block mb-1 text-slate-800 dark:text-slate-200">{line}</span>;
               }
             } else {
-              if (line.trim() === '') content = <br />;
-              else content = <span className={`block mb-1 ${darkMode ? 'text-slate-100' : 'text-slate-800'}`}>{line}</span>;
+              content =
+                line.trim() === '' ? (
+                  <br />
+                ) : (
+                  <span className="block mb-1 text-slate-900 dark:text-slate-100">{line}</span>
+                );
             }
 
             return (
@@ -994,882 +1518,2028 @@ ${PHONETIC_RULES}
     );
   };
 
-  const SkeletonLoader = ({ type }: { type: string }) => {
-    const skeletonClass = `${darkMode ? 'bg-slate-800' : 'bg-slate-200'} rounded-lg`;
-    
-    const containerVariants = {
-      hidden: { opacity: 0 },
-      show: {
-        opacity: 1,
-        transition: {
-          staggerChildren: 0.1
-        }
-      }
-    };
-
-    const itemVariants = {
-      hidden: { opacity: 0, x: -10 },
-      show: { opacity: 1, x: 0 }
-    };
-
-    if (type === 'song') {
-      return (
-        <motion.div variants={containerVariants} initial="hidden" animate="show" className="space-y-8 w-full">
-          <div className="space-y-2">
-            <motion.div variants={itemVariants} className={`h-4 w-48 ${skeletonClass} animate-pulse`}></motion.div>
-            <motion.div variants={itemVariants} className={`h-4 w-32 ${skeletonClass} animate-pulse`}></motion.div>
-          </div>
-          {[1, 2].map(i => (
-            <div key={i} className="space-y-4">
-              <motion.div variants={itemVariants} className={`h-8 w-24 ${skeletonClass} opacity-50 animate-pulse`}></motion.div>
-              <div className="space-y-3">
-                <motion.div variants={itemVariants} className={`h-5 w-full ${skeletonClass} animate-pulse`}></motion.div>
-                <motion.div variants={itemVariants} className={`h-5 w-11/12 ${skeletonClass} animate-pulse`}></motion.div>
-                <motion.div variants={itemVariants} className={`h-5 w-4/5 ${skeletonClass} animate-pulse`}></motion.div>
-              </div>
-            </div>
-          ))}
-        </motion.div>
-      );
-    }
-    
-    if (type === 'analysis' || type === 'music_prompt') {
-      return (
-        <motion.div variants={containerVariants} initial="hidden" animate="show" className="space-y-6 w-full">
-          <motion.div variants={itemVariants} className={`h-6 w-40 ${skeletonClass} animate-pulse`}></motion.div>
-          <div className="space-y-3">
-            <motion.div variants={itemVariants} className={`h-4 w-full ${skeletonClass} animate-pulse`}></motion.div>
-            <motion.div variants={itemVariants} className={`h-4 w-full ${skeletonClass} animate-pulse`}></motion.div>
-            <motion.div variants={itemVariants} className={`h-4 w-3/4 ${skeletonClass} animate-pulse`}></motion.div>
-          </div>
-          <motion.div variants={itemVariants} className={`h-24 w-full ${skeletonClass} border-2 border-dashed ${darkMode ? 'border-slate-700' : 'border-slate-300'} animate-pulse`}></motion.div>
-          <div className="space-y-2">
-            <motion.div variants={itemVariants} className={`h-4 w-full ${skeletonClass} animate-pulse`}></motion.div>
-            <motion.div variants={itemVariants} className={`h-4 w-2/3 ${skeletonClass} animate-pulse`}></motion.div>
-          </div>
-        </motion.div>
-      );
-    }
+  // ============================================================================
+  // SHARED OUTPUT CARD COMPONENT
+  // ============================================================================
+  const renderOutputPanel = () => {
+    if (!outputResult && !isLoading) return null;
 
     return (
-      <motion.div variants={containerVariants} initial="hidden" animate="show" className="space-y-4 w-full">
-        <motion.div variants={itemVariants} className={`h-5 w-full ${skeletonClass} animate-pulse`}></motion.div>
-        <motion.div variants={itemVariants} className={`h-5 w-full ${skeletonClass} animate-pulse`}></motion.div>
-        <motion.div variants={itemVariants} className={`h-5 w-4/5 ${skeletonClass} animate-pulse`}></motion.div>
-        <motion.div variants={itemVariants} className={`h-5 w-full ${skeletonClass} animate-pulse`}></motion.div>
-        <motion.div variants={itemVariants} className={`h-5 w-3/4 ${skeletonClass} animate-pulse`}></motion.div>
-        <motion.div variants={itemVariants} className={`h-5 w-1/2 ${skeletonClass} animate-pulse`}></motion.div>
-      </motion.div>
+      <section
+        ref={outputRef}
+        className="bg-white dark:bg-[#13161C] border border-slate-200 dark:border-slate-800 rounded-2xl overflow-hidden shadow-sm transition-colors"
+      >
+        <div className="px-5 py-3.5 border-b border-slate-200 dark:border-slate-800 bg-slate-50/80 dark:bg-[#0E1015] flex flex-wrap items-center justify-between gap-3">
+          <div className="flex flex-wrap items-center gap-2.5">
+            <AudioLines size={18} className="text-indigo-600 dark:text-indigo-400" />
+            <h2 className="text-sm font-bold text-slate-900 dark:text-slate-100">{t.finalResult}</h2>
+            {lastEngineUsed && !isLoading && (
+              <span className="text-[11px] font-mono text-slate-500 dark:text-slate-400" dir="ltr">
+                · {lastEngineUsed}
+              </span>
+            )}
+            {(lastInternetUsed || lastSourcesChecked.length > 0) && !isLoading && (
+              <span className="inline-flex items-center gap-1 text-[11px] font-medium text-emerald-600 dark:text-emerald-400">
+                <Globe size={12} />
+                <span>{t.internetOn}</span>
+                {lastSourcesChecked.length > 0 && (
+                  <span className="text-slate-400 dark:text-slate-500">
+                    · {lastSourcesChecked.slice(0, 2).join(' · ')}
+                  </span>
+                )}
+              </span>
+            )}
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            {!isLoading && outputResult && (
+              <>
+                {isSpeaking ? (
+                  <>
+                    <button
+                      onClick={isPaused ? resumeSpeaking : pauseSpeaking}
+                      className="h-9 px-3 rounded-lg text-xs font-semibold border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700 flex items-center gap-1.5 transition-colors whitespace-nowrap"
+                    >
+                      {isPaused ? <Play size={14} /> : <Pause size={14} />}
+                      <span>{isPaused ? t.resumeBtn : t.pauseBtn}</span>
+                    </button>
+                    <button
+                      onClick={stopSpeaking}
+                      className="h-9 px-3 rounded-lg text-xs font-semibold border border-red-200 dark:border-red-900/60 bg-red-50 dark:bg-red-950/40 text-red-600 dark:text-red-400 hover:bg-red-100 dark:hover:bg-red-900/40 flex items-center gap-1.5 transition-colors whitespace-nowrap"
+                    >
+                      <VolumeX size={14} />
+                      <span>{t.stopSpeakBtn}</span>
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    onClick={() => speakText(outputResult)}
+                    className="h-9 px-3.5 rounded-lg text-xs font-semibold bg-indigo-600 hover:bg-indigo-500 text-white flex items-center gap-1.5 transition-colors whitespace-nowrap"
+                  >
+                    <Volume2 size={14} />
+                    <span>{t.speakBtn}</span>
+                  </button>
+                )}
+
+                <button
+                  onClick={() => {
+                    setInputText(outputResult);
+                    setActiveTab('studio');
+                  }}
+                  className="h-9 px-3 rounded-lg text-xs font-semibold border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700 flex items-center gap-1.5 transition-colors whitespace-nowrap"
+                >
+                  <Send size={13} />
+                  <span>{t.sendToEditor}</span>
+                </button>
+
+                <button
+                  onClick={copyToClipboard}
+                  className="h-9 px-3 rounded-lg text-xs font-semibold border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700 flex items-center gap-1.5 transition-colors whitespace-nowrap"
+                >
+                  {copyStatus ? <Check size={14} className="text-emerald-500" /> : <Copy size={14} />}
+                  <span>{copyStatus ? t.copied : t.copy}</span>
+                </button>
+
+                <button
+                  onClick={downloadOutput}
+                  className="h-9 px-3 rounded-lg text-xs font-semibold border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700 flex items-center gap-1.5 transition-colors whitespace-nowrap"
+                >
+                  <Download size={14} />
+                  <span>TXT</span>
+                </button>
+
+                <button
+                  onClick={downloadOutputDocx}
+                  className="h-9 px-3 rounded-lg text-xs font-semibold border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700 flex items-center gap-1.5 transition-colors whitespace-nowrap"
+                >
+                  <Download size={14} />
+                  <span>DOCX</span>
+                </button>
+              </>
+            )}
+
+            <button
+              onClick={() => {
+                setOutputResult('');
+                setLastEngineUsed('');
+                setLastInternetUsed(false);
+                setLastSourcesChecked([]);
+                stopSpeaking();
+              }}
+              className="h-9 w-9 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-500 hover:text-red-500 flex items-center justify-center transition-colors"
+              aria-label={t.close}
+            >
+              <X size={15} />
+            </button>
+          </div>
+        </div>
+
+        <div className="p-5 md:p-6">
+          {ttsAudioUrl && (
+            <div className="mb-4 p-3 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#0B0D11]">
+              <audio ref={ttsAudioRef} src={ttsAudioUrl} controls className="w-full h-9" />
+            </div>
+          )}
+
+          {isLoading ? (
+            <div className="py-10 flex flex-col items-center justify-center gap-4">
+              <RefreshCw size={24} className="text-indigo-600 dark:text-indigo-400 animate-spin" />
+              <p className="text-sm font-semibold text-slate-600 dark:text-slate-300">
+                {outputType === 'voice_clone'
+                  ? t.voiceCloneRunning
+                  : outputType === 'song'
+                  ? t.loadingComposing
+                  : outputType === 'tashkeel' || outputType === 'light_diacritics'
+                  ? t.loadingDiacritics
+                  : outputType === 'clean'
+                  ? t.loadingCorrecting
+                  : outputType === 'analysis'
+                  ? t.loadingAnalyzing
+                  : t.loadingProcessing}
+              </p>
+            </div>
+          ) : (
+            <div className="text-lg md:text-xl leading-[2.1] font-arabic">
+              {generatedAudioUrl && (
+                <div className="mb-5 p-4 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#0B0D11]">
+                  <audio src={generatedAudioUrl} controls className="w-full" />
+                </div>
+              )}
+              <VirtualizedOutput text={outputResult} type={outputType} />
+            </div>
+          )}
+
+          {outputResult && outputType === 'voice_clone' && !isLoading && (
+            <div className="mt-6 pt-5 border-t border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-between gap-4">
+              <div className="flex items-center gap-3">
+                <CheckCircle2 size={20} className="text-emerald-600 dark:text-emerald-400" />
+                <span className="text-sm font-semibold text-slate-900 dark:text-slate-100">
+                  {t.downloadReady}
+                </span>
+              </div>
+              <button
+                onClick={downloadResultPackage}
+                className="h-10 px-5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-semibold flex items-center gap-2 transition-colors"
+              >
+                <Download size={16} />
+                <span>{t.exportBtn}</span>
+              </button>
+            </div>
+          )}
+        </div>
+
+        {(outputType === 'song' || outputType === 'voice_clone') && !isLoading && (
+          <div className="px-5 py-3 border-t border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#0E1015] flex items-center gap-2.5 text-xs text-slate-600 dark:text-slate-400">
+            <Info size={15} className="shrink-0 text-indigo-500" />
+            <span>
+              <strong className="text-slate-800 dark:text-slate-200">{t.note}</strong>{' '}
+              {outputType === 'song' ? t.noteText : t.voiceMatchNote}
+            </span>
+          </div>
+        )}
+      </section>
     );
   };
 
-  const LoadingIndicator = ({ task, type }: { task: string, type: string }) => (
-    <div className="flex flex-col items-center justify-center p-4 md:p-8 space-y-8 w-full">
-      <div className="flex flex-col items-center space-y-4">
+  const renderInlineSlotSelector = (slotId: string, customLabel?: string) => {
+    const slot = modelSlots.find((m) => m.id === slotId);
+    if (!slot) return null;
+    const diskModels = slot.availableLocalModels || [];
+    const currentValue = slot.selectedModelPath || '';
+    const externalLabel =
+      !currentValue && slot.activeAdapter !== 'fallback_ai'
+        ? `${slot.activeAdapter}${slot.modelName ? `: ${slot.modelName}` : ''}`
+        : t.defaultBuiltInFallback;
+
+    return (
+      <div className="inline-flex items-center gap-1.5 min-w-0">
+        <span className="text-[11px] font-medium text-slate-500 dark:text-slate-400 whitespace-nowrap">
+          {customLabel || t.activeModelLabel}
+        </span>
         <div className="relative">
-          <div className="w-16 h-16 border-4 border-indigo-500/20 rounded-full"></div>
-          <div className="absolute top-0 left-0 w-16 h-16 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin"></div>
-          <Sparkles className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 text-indigo-400 animate-pulse" size={20} />
+          <select
+            value={currentValue}
+            onChange={(e) => handleSelectSlotModel(slotId, e.target.value)}
+            disabled={savingSlotId === slotId}
+            aria-label={language === 'ar' ? slot.nameAr : slot.nameEn}
+            className="h-8 max-w-[210px] ps-2.5 pe-6 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#0B0D11] text-[11px] font-medium text-slate-800 dark:text-slate-200 appearance-none cursor-pointer truncate disabled:opacity-50"
+          >
+            <option value="">{externalLabel}</option>
+            {diskModels.map((m) => (
+              <option key={m.path} value={m.path}>
+                {m.name} ({m.sizeLabel})
+              </option>
+            ))}
+          </select>
+          <ChevronDown
+            size={12}
+            className="pointer-events-none absolute top-1/2 -translate-y-1/2 end-2 text-slate-400"
+          />
         </div>
-        <p className={`${darkMode ? 'text-indigo-300' : 'text-indigo-600'} font-bold animate-pulse text-xl tracking-wide`}>{task}...</p>
       </div>
-      <div className="w-full max-w-2xl opacity-40">
-        <SkeletonLoader type={type} />
-      </div>
-    </div>
-  );
+    );
+  };
 
   return (
-    <div className={`min-h-screen ${darkMode ? 'bg-[#09090b] text-slate-200' : 'bg-slate-50 text-slate-900'} font-sans p-3 md:p-6 transition-colors duration-500`} dir={language === 'ar' ? 'rtl' : 'ltr'}>
-      <div className="max-w-4xl mx-auto space-y-6">
-        
-        {/* Header */}
-        <header className={`flex flex-col md:flex-row items-start md:items-center justify-between ${darkMode ? 'bg-[#121217] border-slate-800' : 'bg-white border-slate-200'} p-5 rounded-3xl border shadow-xl gap-6 transition-colors duration-500`}>
-          <div className="flex flex-col gap-4">
-            <div className="flex items-center gap-4">
-              <div className="w-16 h-16 rounded-2xl overflow-hidden border-2 border-indigo-500/50 shadow-[0_0_20px_rgba(99,102,241,0.4)] shrink-0">
-                <img 
-                  src="https://i.ibb.co/ZRDHCGHz/Untitled-1080-x-1080-px.jpg" 
-                  alt={t.title} 
+    <div
+      className="min-h-screen flex flex-col bg-[#F8FAFC] dark:bg-[#0B0D11] text-slate-900 dark:text-slate-100 transition-colors duration-200"
+      dir={language === 'ar' ? 'rtl' : 'ltr'}
+    >
+      {/* Hidden audio element for TTS reader playback */}
+      {ttsAudioUrl && <audio ref={ttsAudioRef} src={ttsAudioUrl} className="hidden" />}
+
+      {/* ===================================================================== */}
+      {/* TOP BAR CONTRACT: 3 Clean Zones (Brand — Nav Tabs — Language & Theme) */}
+      {/* ===================================================================== */}
+      <header className="sticky top-0 z-30 bg-white/95 dark:bg-[#111318]/95 backdrop-blur-md border-b border-slate-200 dark:border-slate-800">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between gap-4 sm:gap-8">
+          {/* Zone 1: Exact Brand Image + Exact Name */}
+          <div className="flex items-center gap-3 shrink-0">
+            <div className="w-10 h-10 rounded-xl overflow-hidden border border-slate-200 dark:border-slate-700 bg-slate-100 dark:bg-slate-800 shrink-0 flex items-center justify-center">
+              {!brandImgFailed ? (
+                <img
+                  src={BRAND_IMAGE_URL}
+                  alt={`${t.title} ${t.subtitle}`}
                   className="w-full h-full object-cover"
                   referrerPolicy="no-referrer"
+                  onError={() => setBrandImgFailed(true)}
                 />
-              </div>
-              <div className="flex items-center gap-3">
-                <div className="flex items-end gap-2">
-                  <h1 className={`text-4xl md:text-6xl font-ruqaa ${darkMode ? 'neon-ar' : 'text-indigo-600'} leading-none pb-2 flex items-baseline gap-3`}>
-                    <span>{t.title}</span>
-                    <span>{t.subtitle}</span>
-                  </h1>
-                </div>
-                <div className="h-0.5 w-16 bg-gradient-to-l from-sky-500 to-transparent rounded-full hidden md:block shadow-[0_0_8px_rgba(56,189,248,0.8)] mb-2"></div>
-              </div>
-            </div>
-            <p className={`text-sm md:text-base ${darkMode ? 'text-slate-300 border-slate-800/50' : 'text-slate-600 border-slate-200'} font-bold tracking-wide leading-relaxed border-t pt-3`}>
-              {t.description}
-            </p>
-          </div>
-          
-          <div className="flex flex-col gap-4 w-full md:w-auto">
-            <div className="flex justify-end gap-2">
-              <button 
-                onClick={toggleLanguage}
-                className={`p-2.5 rounded-xl ${darkMode ? 'bg-slate-800 text-slate-300 border-slate-700 hover:text-white' : 'bg-slate-100 text-slate-600 border-slate-200 hover:text-indigo-600'} border transition-all duration-300 shadow-sm min-w-[44px] min-h-[44px] flex items-center justify-center`}
-                aria-label={t.switchLang}
-              >
-                <Languages size={20} />
-                <span className="ms-2 text-xs font-bold">{t.switchLang}</span>
-              </button>
-              <button 
-                onClick={toggleDarkMode}
-                className={`p-2.5 rounded-xl ${darkMode ? 'bg-slate-800 text-slate-300 border-slate-700 hover:text-white' : 'bg-slate-100 text-slate-600 border-slate-200 hover:text-indigo-600'} border transition-all duration-300 shadow-sm min-w-[44px] min-h-[44px] flex items-center justify-center`}
-                aria-label={darkMode ? 'Light Mode' : 'Dark Mode'}
-              >
-                {darkMode ? <Sun size={20} /> : <Moon size={20} />}
-              </button>
-            </div>
-          </div>
-        </header>
-
-        {/* Word Inspector Card */}
-        <div className={`${darkMode ? 'bg-[#1a1a24] border-indigo-900/50 shadow-indigo-500/10' : 'bg-white border-slate-200 shadow-slate-200'} rounded-2xl p-4 border shadow-lg transition-all duration-500`}>
-          <div className="flex flex-col md:flex-row gap-3 items-center">
-            <div className={`flex items-center gap-2 ${darkMode ? 'text-indigo-300' : 'text-indigo-600'} w-full md:w-auto font-bold text-sm`}>
-              <Search size={18} />
-              <span>{t.inspectorTitle}</span>
-            </div>
-            <div className="flex w-full gap-2 relative">
-              <input 
-                type="text"
-                value={searchWord}
-                onChange={(e) => setSearchWord(e.target.value)}
-                placeholder={t.inspectorPlaceholder}
-                className={`flex-1 ${darkMode ? 'bg-[#09090b] border-slate-700 text-white focus:ring-indigo-500' : 'bg-slate-50 border-slate-200 text-slate-900 focus:ring-indigo-400'} border rounded-xl px-4 py-2 text-base focus:ring-1 transition-all min-h-[44px]`}
-              />
-              <button 
-                onClick={handleWordSearch}
-                disabled={isSearchingWord || !searchWord.trim()}
-                className="bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-2 rounded-xl text-sm font-bold disabled:opacity-50 transition-all flex items-center gap-2 shadow-md hover:shadow-indigo-500/40 min-h-[44px]"
-              >
-                {isSearchingWord ? <RefreshCw size={16} className="animate-spin" /> : <BookOpen size={16} />}
-                {t.getDiacritics}
-              </button>
-            </div>
-          </div>
-          <AnimatePresence mode="wait">
-            {wordSuggestions && (
-              <motion.div 
-                initial={{ opacity: 0, scale: 0.95, filter: 'blur(10px)' }}
-                animate={{ opacity: 1, scale: 1, filter: 'blur(0px)' }}
-                exit={{ opacity: 0, scale: 0.95, filter: 'blur(10px)' }}
-                transition={{ duration: 0.4, ease: [0.22, 1, 0.36, 1] }}
-                className="mt-4 space-y-4"
-              >
-                {wordSuggestions.suggestions && (
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                    {wordSuggestions.suggestions.map((item: any, index: number) => (
-                      <div key={index} className={`flex justify-between items-center p-3 ${darkMode ? 'bg-[#09090b] border-slate-800 hover:border-indigo-500/50' : 'bg-slate-50 border-slate-200 hover:border-indigo-400'} rounded-xl border transition-colors`}>
-                        <div>
-                          <span className={`text-xl font-bold ${darkMode ? 'text-indigo-400' : 'text-indigo-600'} font-arabic`}>{item.word}</span>
-                          <p className={`text-xs ${darkMode ? 'text-slate-400' : 'text-slate-500'} mt-1`}>{item.meaning}</p>
-                        </div>
-                        {isSpeaking ? (
-                          <button 
-                            onClick={stopSpeaking} 
-                            className={`p-2.5 ${darkMode ? 'bg-red-900/30 text-red-500 hover:bg-red-600/50' : 'bg-red-100 text-red-600 hover:bg-red-200'} rounded-xl hover:text-white transition-colors flex-shrink-0 min-w-[44px] min-h-[44px] flex items-center justify-center`}
-                            aria-label={t.stopSpeakBtn}
-                          >
-                            <VolumeX size={20} />
-                          </button>
-                        ) : (
-                          <button 
-                            onClick={() => speakText(item.word)} 
-                            className={`p-2.5 ${darkMode ? 'bg-indigo-900/30 text-indigo-300 hover:bg-indigo-600' : 'bg-indigo-100 text-indigo-600 hover:bg-indigo-600'} rounded-xl hover:text-white transition-colors flex-shrink-0 min-w-[44px] min-h-[44px] flex items-center justify-center`}
-                            aria-label={t.speakBtn}
-                          >
-                            <Volume2 size={20} />
-                          </button>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                )}
-                
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  {wordSuggestions.synonyms && wordSuggestions.synonyms.length > 0 && (
-                    <details className={`group ${darkMode ? 'bg-[#09090b] border-slate-800' : 'bg-slate-50 border-slate-200'} rounded-xl border [&_summary::-webkit-details-marker]:hidden`}>
-                      <summary className="flex cursor-pointer items-center justify-between p-4 font-bold">
-                        <h4 className={`text-sm ${darkMode ? 'text-emerald-400' : 'text-emerald-600'}`}>{t.synonyms}</h4>
-                        <span className={`transition group-open:-rotate-180 ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>
-                          <svg fill="none" height="24" shapeRendering="geometricPrecision" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" viewBox="0 0 24 24" width="24"><path d="M6 9l6 6 6-6"></path></svg>
-                        </span>
-                      </summary>
-                      <div className="flex flex-wrap gap-2 px-4 pb-4">
-                        {wordSuggestions.synonyms.map((s: string, i: number) => (
-                          <button 
-                            key={i} 
-                            onClick={() => { setSearchWord(s); setTimeout(handleWordSearch, 100); }}
-                            className={`px-3 py-1.5 ${darkMode ? 'bg-emerald-900/20 text-emerald-300 hover:bg-emerald-800/40' : 'bg-emerald-100 text-emerald-700 hover:bg-emerald-200'} rounded-lg text-xs font-bold transition-all hover:scale-105 active:scale-95`}
-                          >
-                            {s}
-                          </button>
-                        ))}
-                      </div>
-                    </details>
-                  )}
-                  {wordSuggestions.antonyms && wordSuggestions.antonyms.length > 0 && (
-                    <details className={`group ${darkMode ? 'bg-[#09090b] border-slate-800' : 'bg-slate-50 border-slate-200'} rounded-xl border [&_summary::-webkit-details-marker]:hidden`}>
-                      <summary className="flex cursor-pointer items-center justify-between p-4 font-bold">
-                        <h4 className={`text-sm ${darkMode ? 'text-red-400' : 'text-red-600'}`}>{t.antonyms}</h4>
-                        <span className={`transition group-open:-rotate-180 ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>
-                          <svg fill="none" height="24" shapeRendering="geometricPrecision" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" viewBox="0 0 24 24" width="24"><path d="M6 9l6 6 6-6"></path></svg>
-                        </span>
-                      </summary>
-                      <div className="flex flex-wrap gap-2 px-4 pb-4">
-                        {wordSuggestions.antonyms.map((a: string, i: number) => (
-                          <button 
-                            key={i} 
-                            onClick={() => { setSearchWord(a); setTimeout(handleWordSearch, 100); }}
-                            className={`px-3 py-1.5 ${darkMode ? 'bg-red-900/20 text-red-300 hover:bg-red-800/40' : 'bg-red-100 text-red-700 hover:bg-red-200'} rounded-lg text-xs font-bold transition-all hover:scale-105 active:scale-95`}
-                          >
-                            {a}
-                          </button>
-                        ))}
-                      </div>
-                    </details>
-                  )}
-                </div>
-              </motion.div>
-            )}
-          </AnimatePresence>
-        </div>
-
-        {/* Input Area */}
-        <div className={`${darkMode ? 'bg-[#121217] border-slate-800 shadow-indigo-500/5' : 'bg-white border-slate-200 shadow-slate-200'} rounded-3xl p-5 md:p-6 border shadow-xl transition-all duration-500`}>
-          
-          {/* Audio Upload Section */}
-          <div className={`mb-6 p-4 ${darkMode ? 'bg-[#09090b] border-slate-800' : 'bg-slate-50 border-slate-200'} border rounded-2xl`}>
-            <div className="flex flex-col w-full gap-4">
-              <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
-                <div className="flex flex-col w-full items-start gap-3">
-                  <div className="flex flex-col md:flex-row w-full items-start md:items-center gap-3">
-                    <button 
-                      onClick={() => fileInputRef.current?.click()}
-                      className={`flex items-center justify-center gap-2 ${darkMode ? 'bg-slate-800 text-white hover:bg-slate-700' : 'bg-slate-200 text-slate-700 hover:bg-slate-300'} px-4 py-2 rounded-xl text-sm font-bold transition-colors min-h-[44px] shrink-0 w-full md:w-auto`}
-                    >
-                      <Upload size={18} /> {audioFile ? t.changeAudio : t.uploadAudio}
-                    </button>
-                    <input 
-                      type="file" 
-                      ref={fileInputRef} 
-                      onChange={handleAudioUpload} 
-                      accept="audio/*" 
-                      className="hidden" 
-                      aria-label={t.uploadAudio}
-                    />
-                    <div className="flex-1 w-full relative">
-                      <input 
-                        type="text" 
-                        value={youtubeLink}
-                        onChange={(e) => setYoutubeLink(e.target.value)}
-                        placeholder={t.youtubeLinkPlaceholder}
-                        className={`w-full ${darkMode ? 'bg-slate-900 border-slate-700 text-slate-200 focus:ring-rose-500' : 'bg-white border-slate-200 text-slate-900 focus:ring-rose-400'} border rounded-xl p-3 text-sm focus:ring-2 transition-all min-h-[44px] pl-10 rtl:pr-10 rtl:pl-3`}
-                      />
-                      <Youtube size={18} className={`absolute top-1/2 -translate-y-1/2 ${darkMode ? 'text-slate-400' : 'text-slate-500'} rtl:right-3 ltr:left-3`} />
-                    </div>
-                  </div>
-                  {audioFile && (
-                    <div className="flex flex-col gap-1 w-full mt-2">
-                      <span className={`text-xs ${darkMode ? 'text-emerald-400' : 'text-emerald-600'} font-bold flex items-center gap-1`}>
-                        {isUploadSuccess ? <Check size={14} /> : <RefreshCw size={14} className="animate-spin" />} 
-                        {audioFile.name}
-                      </span>
-                      {!isUploadSuccess && (
-                        <div className="w-full md:w-48 h-1.5 bg-slate-200 dark:bg-slate-700 rounded-full overflow-hidden">
-                          <div 
-                            className="h-full bg-indigo-500 transition-all duration-300" 
-                            style={{ width: `${uploadProgress}%` }}
-                          ></div>
-                        </div>
-                      )}
-                      {isUploadSuccess && (
-                        <span className="text-[10px] text-emerald-500 font-medium">
-                          {language === 'ar' ? 'تم الرفع بنجاح' : 'Upload successful'}
-                        </span>
-                      )}
-                    </div>
-                  )}
-                </div>
-              </div>
-                
-              {((audioFile && isUploadSuccess) || youtubeLink.trim()) && (
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-2 w-full mt-2">
-                  <button 
-                    onClick={() => processAudio('general')}
-                    disabled={isLoading || !audioFile}
-                    className={`flex items-center justify-center gap-2 ${darkMode ? 'bg-blue-600/20 text-blue-400 hover:bg-blue-600/30 border-blue-500/30' : 'bg-blue-100 text-blue-600 hover:bg-blue-200 border-blue-200'} border px-4 py-2 rounded-xl text-sm font-bold transition-colors disabled:opacity-50 min-h-[44px]`}
-                  >
-                    <FileAudio size={18} /> {t.transcribeGeneral}
-                  </button>
-                  <button 
-                    onClick={() => processAudio('egyptian')}
-                    disabled={isLoading || !audioFile}
-                    className="flex items-center justify-center gap-2 bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-2 rounded-xl text-sm font-bold transition-colors disabled:opacity-50 shadow-lg shadow-indigo-500/20 min-h-[44px]"
-                  >
-                    <FileAudio size={18} /> {t.transcribeEgyptian}
-                  </button>
-                  <button 
-                    onClick={() => processAudio('analyze_music')}
-                    disabled={isLoading || !audioFile}
-                    className="flex items-center justify-center gap-2 bg-amber-600 hover:bg-amber-500 text-white px-4 py-2 rounded-xl text-sm font-bold transition-colors disabled:opacity-50 shadow-lg shadow-amber-500/20 min-h-[44px]"
-                  >
-                    <Music size={18} /> {t.analyzeMusic}
-                  </button>
-                  <button 
-                    onClick={handleDeepMusicAnalysis}
-                    disabled={isLoading || (!audioFile && !youtubeLink.trim())}
-                    className="flex items-center justify-center gap-2 bg-rose-600 hover:bg-rose-500 text-white px-4 py-2 rounded-xl text-sm font-bold transition-colors disabled:opacity-50 shadow-lg shadow-rose-500/20 min-h-[44px]"
-                  >
-                    <Search size={18} /> {t.deepMusicAnalysisBtn}
-                  </button>
-                </div>
+              ) : (
+                <Feather size={20} className="text-indigo-600 dark:text-indigo-400" />
               )}
             </div>
+            <span className="font-ruqaa text-2xl font-bold text-slate-900 dark:text-white whitespace-nowrap shrink-0 leading-none">
+              {t.title} <span className="text-indigo-600 dark:text-indigo-400">{t.subtitle}</span>
+            </span>
           </div>
 
-          {/* New Tools Section */}
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
-            <div className="flex gap-2">
-              <input 
-                type="text"
-                value={rhymeWord}
-                onChange={(e) => setRhymeWord(e.target.value)}
-                placeholder={t.rhymePlaceholder}
-                className={`flex-1 ${darkMode ? 'bg-[#09090b] border-slate-800 text-slate-200 focus:ring-indigo-500' : 'bg-slate-50 border-slate-200 text-slate-900 focus:ring-indigo-400'} border rounded-xl p-3 text-base focus:ring-1 transition-all min-h-[44px]`}
-              />
-              <button 
-                onClick={handleFindRhymes}
-                disabled={isLoading}
-                className="bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-2 rounded-xl text-sm font-bold transition-all disabled:opacity-50 shadow-md hover:shadow-indigo-500/30 min-h-[44px]"
-              >
-                {t.rhymes}
-              </button>
-            </div>
-            <div className="flex gap-2">
-              <input 
-                type="text"
-                value={lineToRewrite}
-                onChange={(e) => setLineToRewrite(e.target.value)}
-                placeholder={t.rewritePlaceholder}
-                className={`flex-1 ${darkMode ? 'bg-[#09090b] border-slate-800 text-slate-200 focus:ring-indigo-500' : 'bg-slate-50 border-slate-200 text-slate-900 focus:ring-indigo-400'} border rounded-xl p-3 text-base focus:ring-1 transition-all min-h-[44px]`}
-              />
-              <button 
-                onClick={handleRewriteLine}
-                disabled={isLoading}
-                className="bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-2 rounded-xl text-sm font-bold transition-all disabled:opacity-50 shadow-md hover:shadow-emerald-500/30 min-h-[44px]"
-              >
-                {t.rewrite}
-              </button>
-            </div>
-          </div>
+          {/* Zone 2: Clean Single-Line Navigation Links */}
+          <nav className="hidden md:flex items-center gap-6">
+            <button
+              onClick={() => setActiveTab('studio')}
+              className={`py-5 text-sm font-semibold border-b-2 transition-colors whitespace-nowrap shrink-0 ${
+                activeTab === 'studio'
+                  ? 'border-indigo-600 text-indigo-600 dark:text-indigo-400 dark:border-indigo-400'
+                  : 'border-transparent text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
+              }`}
+            >
+              {t.navStudio}
+            </button>
+            <button
+              onClick={() => setActiveTab('audio')}
+              className={`py-5 text-sm font-semibold border-b-2 transition-colors whitespace-nowrap shrink-0 ${
+                activeTab === 'audio'
+                  ? 'border-indigo-600 text-indigo-600 dark:text-indigo-400 dark:border-indigo-400'
+                  : 'border-transparent text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
+              }`}
+            >
+              {t.navAudio}
+            </button>
+            <button
+              onClick={() => {
+                setActiveTab('models');
+                fetchModelsStatus();
+              }}
+              className={`py-5 text-sm font-semibold border-b-2 transition-colors whitespace-nowrap shrink-0 ${
+                activeTab === 'models'
+                  ? 'border-indigo-600 text-indigo-600 dark:text-indigo-400 dark:border-indigo-400'
+                  : 'border-transparent text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
+              }`}
+            >
+              {t.navModels}
+            </button>
+          </nav>
 
-          <div className="flex justify-between items-center mb-3 flex-wrap gap-2">
-            <label className={`text-sm font-bold ${darkMode ? 'text-slate-400' : 'text-slate-500'} flex items-center gap-2`}>
-               {t.mainInputLabel}
-            </label>
-            <div className={`flex flex-wrap justify-center ${darkMode ? 'bg-[#09090b] border-slate-800' : 'bg-slate-50 border-slate-200'} rounded-xl p-1 border gap-1 w-full md:w-auto mt-2 md:mt-0 order-3 md:order-2`}>
-               {Object.entries(t.genres).map(([id, label]) => (
-                 <div key={id} className="relative group flex-1 md:flex-none">
-                   <button 
-                      onClick={() => setGenre(id)}
-                      className={`w-full px-4 py-2 rounded-lg text-xs font-bold transition-all duration-300 min-h-[36px] ${
-                        genre === id 
-                        ? (darkMode ? 'bg-slate-800 text-indigo-400 shadow-md' : 'bg-white text-indigo-600 shadow-md border border-slate-200')
-                        : (darkMode ? 'text-slate-500 hover:text-slate-300' : 'text-slate-400 hover:text-slate-600')
+          {/* Zone 3: Language & Theme Controls */}
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              onClick={() => setLanguage(language === 'ar' ? 'en' : 'ar')}
+              className="h-10 px-3.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800/80 hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 text-xs font-semibold flex items-center gap-2 transition-colors whitespace-nowrap shrink-0"
+              aria-label={t.switchLang}
+            >
+              <Languages size={16} />
+              <span>{t.switchLang}</span>
+            </button>
+            <button
+              onClick={() => setDarkMode(!darkMode)}
+              className="h-10 w-10 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800/80 hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 flex items-center justify-center transition-colors shrink-0"
+              aria-label={darkMode ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
+            >
+              {darkMode ? <Sun size={17} /> : <Moon size={17} />}
+            </button>
+          </div>
+        </div>
+
+        {/* Mobile Tab Switcher */}
+        <div className="flex md:hidden border-t border-slate-200 dark:border-slate-800 px-4 gap-2 overflow-x-auto">
+          {(['studio', 'audio', 'models'] as ActiveTab[]).map((tab) => (
+            <button
+              key={tab}
+              onClick={() => {
+                setActiveTab(tab);
+                if (tab === 'models') fetchModelsStatus();
+              }}
+              className={`py-2.5 px-3 text-xs font-semibold border-b-2 whitespace-nowrap shrink-0 ${
+                activeTab === tab
+                  ? 'border-indigo-600 text-indigo-600 dark:text-indigo-400'
+                  : 'border-transparent text-slate-500'
+              }`}
+            >
+              {tab === 'studio' ? t.navStudio : tab === 'audio' ? t.navAudio : t.navModels}
+            </button>
+          ))}
+        </div>
+      </header>
+
+      {/* ===================================================================== */}
+      {/* MAIN WORKSPACE CONTENT                                                */}
+      {/* ===================================================================== */}
+      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 py-6 space-y-6">
+        {/* Global Error Banner */}
+        {error && (
+          <div className="p-4 rounded-xl border border-red-200 dark:border-red-900/60 bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2.5 text-sm font-medium">
+              <AlertCircle size={18} className="shrink-0" />
+              <span>{error}</span>
+            </div>
+            <button
+              onClick={() => setError(null)}
+              className="p-1 text-red-500 hover:text-red-700"
+              aria-label={t.close}
+            >
+              <X size={16} />
+            </button>
+          </div>
+        )}
+
+        {/* Slim Live VRAM Occupancy Bar (visible only while a local model is loaded in GPU/RAM) */}
+        {vramStatus &&
+          (vramStatus.activeLoadedModel ||
+            vramStatus.pythonWorkerRunning ||
+            vramStatus.ollamaLoadedModels.length > 0) &&
+          activeTab !== 'models' && (
+            <div className="px-4 py-2.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#13161C] flex flex-wrap items-center justify-between gap-3 text-xs">
+              <div className="flex flex-wrap items-center gap-2.5 text-slate-700 dark:text-slate-300">
+                <Cpu size={14} className="text-indigo-600 dark:text-indigo-400 shrink-0" />
+                <span className="font-semibold">{t.activeInVramLabel}</span>
+                <span className="font-mono font-semibold text-slate-900 dark:text-white" dir="ltr">
+                  {vramStatus.activeLoadedModel
+                    ? `${vramStatus.activeLoadedModel.adapter}:${vramStatus.activeLoadedModel.modelLabel}`
+                    : vramStatus.ollamaLoadedModels.map((m) => `ollama:${m.name}`).join(', ') ||
+                      'local_disk:worker'}
+                </span>
+                {vramStatus.idleSecondsRemaining !== null && (
+                  <span className="text-slate-500 dark:text-slate-400 tabular-nums">
+                    · {t.autoUnloadInLabel} {vramStatus.idleSecondsRemaining} {t.unloadSecondsOption}
+                  </span>
+                )}
+              </div>
+              <button
+                type="button"
+                onClick={() => handleUnloadAllGpu('manual_bar')}
+                disabled={isUnloadingGpu}
+                className="h-8 px-3 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 text-xs font-semibold text-slate-800 dark:text-slate-200 flex items-center gap-1.5 transition-colors disabled:opacity-40 whitespace-nowrap"
+              >
+                <Zap size={13} className="text-amber-500" />
+                <span>{isUnloadingGpu ? t.unloadingGpu : t.unloadAllNowBtn}</span>
+              </button>
+            </div>
+          )}
+
+        {/* =================================================================== */}
+        {/* TAB 1: STUDIO (2-Column Workbench + Linguistic Tools Sidebar)       */}
+        {/* =================================================================== */}
+        {activeTab === 'studio' && (
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+            {/* Primary Studio Column (8 cols) */}
+            <div className="lg:col-span-8 space-y-6">
+              <section className="bg-white dark:bg-[#13161C] border border-slate-200 dark:border-slate-800 rounded-2xl p-5 sm:p-6 shadow-sm space-y-5">
+                {/* Editor Top Bar: Title + Gender Selector + Utility Icons */}
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div className="flex flex-wrap items-center gap-3">
+                    <span className="text-sm font-bold text-slate-900 dark:text-slate-100">
+                      {t.mainInputLabel}
+                    </span>
+
+                    {/* Gender Segmented Control */}
+                    <div className="inline-flex items-center p-0.5 rounded-lg bg-slate-100 dark:bg-[#0B0D11] border border-slate-200 dark:border-slate-800">
+                      {(
+                        [
+                          { id: 'auto', label: t.genderAuto },
+                          { id: 'masculine', label: t.genderMasculine },
+                          { id: 'feminine', label: t.genderFeminine },
+                        ] as const
+                      ).map((g) => (
+                        <button
+                          key={g.id}
+                          type="button"
+                          onClick={() => setGenderPreference(g.id)}
+                          className={`px-3 py-1.5 rounded-md text-xs font-semibold transition-colors whitespace-nowrap ${
+                            genderPreference === g.id
+                              ? 'bg-white dark:bg-slate-800 text-indigo-600 dark:text-indigo-400 shadow-xs'
+                              : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
+                          }`}
+                        >
+                          {g.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Studio Smart Model Selector + Editor Utility Icons */}
+                  <div className="flex flex-wrap items-center gap-2">
+                    {renderInlineSlotSelector('smart_studio')}
+                    <div className="flex items-center gap-1.5">
+                    <button
+                      onClick={handleRemoveAllDiacritics}
+                      disabled={!inputText.trim() && !outputResult.trim()}
+                      title={t.clearDiacriticsInstant}
+                      aria-label={t.clearDiacriticsInstant}
+                      className="h-9 px-2.5 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#0B0D11] text-slate-600 dark:text-slate-300 hover:text-indigo-600 dark:hover:text-indigo-400 disabled:opacity-40 flex items-center gap-1.5 text-xs font-medium transition-colors whitespace-nowrap"
+                    >
+                      <Eraser size={15} />
+                      <span className="hidden sm:inline">{t.clearDiacriticsInstant}</span>
+                    </button>
+                    <button
+                      onClick={loadInput}
+                      title={t.loadSaved}
+                      aria-label={t.loadSaved}
+                      className="h-9 w-9 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#0B0D11] text-slate-600 dark:text-slate-300 hover:text-indigo-600 dark:hover:text-indigo-400 flex items-center justify-center transition-colors"
+                    >
+                      <FolderOpen size={15} />
+                    </button>
+                    <button
+                      onClick={saveInput}
+                      title={t.saveText}
+                      aria-label={t.saveText}
+                      className="h-9 w-9 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#0B0D11] text-slate-600 dark:text-slate-300 hover:text-emerald-600 dark:hover:text-emerald-400 flex items-center justify-center transition-colors"
+                    >
+                      <Save size={15} />
+                    </button>
+                    <button
+                      onClick={() => setInputText('')}
+                      title={t.clear}
+                      aria-label={t.clear}
+                      className="h-9 w-9 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#0B0D11] text-slate-600 dark:text-slate-300 hover:text-red-500 flex items-center justify-center transition-colors"
+                    >
+                      <Trash2 size={15} />
+                    </button>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Main Textarea */}
+                <textarea
+                  value={inputText}
+                  onChange={(e) => setInputText(e.target.value)}
+                  placeholder={t.mainInputPlaceholder}
+                  rows={5}
+                  className="w-full min-h-[168px] p-4 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#0B0D11] text-slate-900 dark:text-slate-100 placeholder:text-slate-400 dark:placeholder:text-slate-600 text-lg leading-[2] font-arabic resize-y focus:border-indigo-500 transition-colors"
+                  aria-label={t.mainInputLabel}
+                />
+
+                {/* Voice Recording Bar (ASR Model + Live Dictation) & Quick Examples */}
+                <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      onClick={toggleASRRecording}
+                      disabled={isLoading}
+                      className={`h-10 px-4 rounded-xl text-xs font-semibold flex items-center gap-2 transition-colors whitespace-nowrap shrink-0 ${
+                        isRecordingASR
+                          ? 'bg-red-600 hover:bg-red-500 text-white'
+                          : 'bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 hover:bg-slate-800 dark:hover:bg-white'
                       }`}
                     >
-                     {label}
-                   </button>
-                   <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-3 py-2 bg-slate-800 text-white text-[10px] rounded-lg opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity z-50 w-40 text-center shadow-xl border border-slate-700">
-                     {t.genreDescriptions[id as keyof typeof t.genreDescriptions]}
-                     <div className="absolute top-full left-1/2 -translate-x-1/2 border-8 border-transparent border-t-slate-800"></div>
-                   </div>
-                 </div>
-               ))}
-            </div>
-            <div className="flex gap-2 order-2 md:order-3 ms-auto">
-              <button onClick={loadInput} className={`${darkMode ? 'text-slate-600 hover:text-indigo-400' : 'text-slate-400 hover:text-indigo-600'} transition-colors p-1 min-w-[44px] min-h-[44px] flex items-center justify-center`} aria-label={t.loadSaved}>
-                <FolderOpen size={18} />
-              </button>
-              <button onClick={saveInput} className={`${darkMode ? 'text-slate-600 hover:text-emerald-400' : 'text-slate-400 hover:text-emerald-600'} transition-colors p-1 min-w-[44px] min-h-[44px] flex items-center justify-center`} aria-label={t.saveText}>
-                <Save size={18} />
-              </button>
-              <button onClick={() => setInputText('')} className={`${darkMode ? 'text-slate-600 hover:text-red-400' : 'text-slate-400 hover:text-red-600'} transition-colors p-1 min-w-[44px] min-h-[44px] flex items-center justify-center`} aria-label={t.clear}>
-                <Trash2 size={18} />
-              </button>
-            </div>
-          </div>
-
-          <textarea
-            value={inputText}
-            onChange={(e) => setInputText(e.target.value)}
-            placeholder={t.mainInputPlaceholder}
-            className={`w-full h-32 ${darkMode ? 'bg-[#09090b] border-slate-800 text-slate-200 focus:ring-indigo-500 placeholder:text-slate-700' : 'bg-slate-50 border-slate-200 text-slate-900 focus:ring-indigo-400 placeholder:text-slate-400'} border rounded-2xl p-4 text-base focus:ring-1 focus:border-indigo-500 resize-none font-arabic transition-all min-h-[120px]`}
-            aria-label={t.mainInputLabel}
-          />
-
-          {/* Example Prompts */}
-          <div className="flex flex-wrap gap-2 mt-3">
-            <span className={`text-xs ${darkMode ? 'text-slate-500' : 'text-slate-400'} py-1 font-bold`}>{t.examples}</span>
-            {[
-              { label: t.exSong, text: language === 'ar' ? 'قصة شاب بيكافح في زحمة القاهرة وعنده طموح كبير' : 'Story of a young man struggling in Cairo traffic with big ambition' },
-              { label: language === 'ar' ? 'مهرجان: زميلي السند' : 'Mahragan: My Loyal Friend', text: language === 'ar' ? 'اكتب مهرجان عن الصحاب الجدعة والرجولة في وقت الشدة بكلمات شوارع قوية' : 'Write a Mahragan about loyal friends and manhood in tough times with strong street words' },
-              { label: t.exDiacritics, text: language === 'ar' ? 'انا رحت الشغل الصبح بدري وكان الجو برد جدا ومفيش مواصلات' : 'I went to work early in the morning, it was very cold and no transportation' },
-              { label: t.exPrompt, text: language === 'ar' ? 'عايز برومبت لمهرجان شعبي مصري قوي فيه طبلة وكهربا' : 'I want a prompt for a strong Egyptian Shaabi festival with tabla and electro' }
-            ].map((ex, i) => (
-              <button 
-                key={i} 
-                onClick={() => setInputText(ex.text)}
-                className={`text-xs ${darkMode ? 'bg-slate-800/50 hover:bg-slate-700 text-slate-300 border-slate-700/50' : 'bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200'} px-3 py-1.5 rounded-full transition-colors border min-h-[32px]`}
-              >
-                {ex.label}
-              </button>
-            ))}
-          </div>
-
-          {/* Action Buttons Grid */}
-          <div className="grid grid-cols-1 md:grid-cols-4 gap-3 mt-4">
-            <button 
-              onClick={toggleListening}
-              className={`col-span-1 py-4 rounded-2xl font-bold flex items-center justify-center gap-2 transition-all border-2 min-h-[56px] ${
-                isListening 
-                ? 'bg-red-500/20 border-red-500 text-red-400 shadow-[0_0_20px_rgba(239,68,68,0.5)] animate-pulse' 
-                : 'bg-indigo-600 hover:bg-indigo-500 text-white border-indigo-500 shadow-lg shadow-indigo-500/30'
-              }`}
-              aria-label={isListening ? t.stopRecording : t.startRecording}
-            >
-              {isListening ? <MicOff size={24} /> : <Mic size={24} />}
-              <span className="text-sm">{isListening ? t.stopRecording : t.startRecording}</span>
-            </button>
-
-            <button 
-              onClick={handleTashkeelOnly}
-              disabled={isLoading || !inputText.trim()}
-              className="col-span-1 py-3.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-2xl font-bold text-sm flex items-center justify-center gap-2 disabled:opacity-50 transition-all shadow-lg shadow-indigo-500/20 min-h-[56px]"
-            >
-              <Feather size={18} /> {t.diacriticsBtn}
-            </button>
-
-            <button 
-              onClick={handleSpellCheckAndSpeak}
-              disabled={isLoading || !inputText.trim()}
-              className="col-span-1 py-3.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-2xl font-bold text-sm flex items-center justify-center gap-2 disabled:opacity-50 transition-all shadow-lg shadow-emerald-500/20 min-h-[56px]"
-            >
-              <Volume2 size={18} /> {t.correctBtn}
-            </button>
-
-            <button 
-              onClick={() => setShowSunoModal(true)}
-              disabled={isLoading || (!inputText.trim() && !outputResult.trim() && !audioFile)}
-              className="col-span-1 py-3.5 bg-amber-600 hover:bg-amber-500 text-white rounded-2xl font-bold text-sm flex items-center justify-center gap-2 disabled:opacity-50 transition-all shadow-lg shadow-amber-500/20 min-h-[56px]"
-            >
-              <Headphones size={18} /> {t.sunoPromptBtn}
-            </button>
-
-            <button 
-              onClick={handleAnalyzeLyrics}
-              disabled={isLoading || (!inputText.trim() && !outputResult.trim())}
-              className="col-span-1 py-3.5 bg-purple-600 hover:bg-purple-500 text-white rounded-2xl font-bold text-sm flex items-center justify-center gap-2 disabled:opacity-50 transition-all shadow-lg shadow-purple-500/20 min-h-[56px]"
-            >
-              <Music size={18} /> {t.analyzeLyricsBtn}
-            </button>
-
-            <button 
-              onClick={handleFormatLyrics}
-              disabled={isLoading || (!inputText.trim() && !outputResult.trim())}
-              className="col-span-1 py-3.5 bg-blue-600 hover:bg-blue-500 text-white rounded-2xl font-bold text-sm flex items-center justify-center gap-2 disabled:opacity-50 transition-all shadow-lg shadow-blue-500/20 min-h-[56px]"
-            >
-              <BookOpen size={18} /> {t.formatLyricsBtn}
-            </button>
-
-            <button 
-              onClick={handleWriteLyrics}
-              disabled={isLoading || !inputText.trim()}
-              className="col-span-1 py-3.5 bg-sky-600 hover:bg-sky-500 text-white rounded-2xl font-bold text-sm flex items-center justify-center gap-2 shadow-lg shadow-sky-500/20 disabled:opacity-50 transition-all min-h-[56px]"
-            >
-              <Feather size={18} /> {t.writeLyricsBtn}
-            </button>
-
-            <button 
-              onClick={handleGenerateSong}
-              disabled={isLoading || !inputText.trim()}
-              className="col-span-1 py-3.5 bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white rounded-2xl font-bold text-sm flex items-center justify-center gap-2 shadow-lg shadow-indigo-500/25 disabled:opacity-50 transition-all min-h-[56px]"
-            >
-              <Sparkles size={18} /> {t.composeBtn}
-            </button>
-
-            <button 
-              onClick={() => setShowVoiceCloneModal(true)}
-              className="col-span-1 py-3.5 bg-rose-600 hover:bg-rose-500 text-white rounded-2xl font-bold text-sm flex items-center justify-center gap-2 transition-all shadow-lg shadow-rose-500/20 min-h-[56px]"
-            >
-              <Mic size={18} /> {t.voiceCloneBtn}
-            </button>
-          </div>
-        </div>
-
-        {/* Error Alert */}
-        {error && (
-          <div className={`p-4 ${darkMode ? 'bg-red-900/30 border-red-500/30 text-red-400' : 'bg-red-50 border-red-200 text-red-600'} border rounded-2xl flex items-center gap-3 animate-in fade-in zoom-in duration-300`}>
-            <AlertCircle size={20} className="shrink-0" />
-            <span className="text-sm font-bold">{error}</span>
-          </div>
-        )}
-
-        {/* Output Area */}
-        {(outputResult || isLoading) && (
-          <div ref={outputRef} className={`${darkMode ? 'bg-[#121217] border-slate-800 shadow-indigo-500/10' : 'bg-white border-slate-200 shadow-slate-200'} rounded-3xl border shadow-2xl overflow-hidden animate-in slide-in-from-bottom-8 duration-500 transition-all`}>
-            
-            <div className={`${darkMode ? 'bg-[#09090b] border-slate-800' : 'bg-slate-50 border-slate-200'} p-4 md:px-6 border-b flex items-center justify-between sticky top-0 z-20`}>
-              <div className="flex items-center gap-2">
-                <PlaySquare size={20} className="text-indigo-400" />
-                <span className={`font-bold ${darkMode ? 'text-white' : 'text-slate-900'}`}>{t.finalResult}</span>
-              </div>
-              <div className="flex gap-2">
-                {!isLoading && outputResult && (
-                  isSpeaking ? (
-                    <>
-                      {isPaused ? (
-                        <button 
-                          onClick={resumeSpeaking}
-                          className={`flex items-center gap-1.5 px-4 py-2 rounded-xl text-sm font-bold ${darkMode ? 'bg-amber-500/20 text-amber-500 border-amber-500/30 hover:bg-amber-500/30' : 'bg-amber-100 text-amber-600 border-amber-200 hover:bg-amber-200'} border transition-all min-h-[44px]`}
-                          aria-label={t.resumeBtn}
-                        >
-                          <Play size={18} /> <span className="hidden md:inline">{t.resumeBtn}</span>
-                        </button>
-                      ) : (
-                        <button 
-                          onClick={pauseSpeaking}
-                          className={`flex items-center gap-1.5 px-4 py-2 rounded-xl text-sm font-bold ${darkMode ? 'bg-amber-500/20 text-amber-500 border-amber-500/30 hover:bg-amber-500/30' : 'bg-amber-100 text-amber-600 border-amber-200 hover:bg-amber-200'} border transition-all min-h-[44px]`}
-                          aria-label={t.pauseBtn}
-                        >
-                          <Pause size={18} /> <span className="hidden md:inline">{t.pauseBtn}</span>
-                        </button>
-                      )}
-                      <button 
-                        onClick={stopSpeaking}
-                        className={`flex items-center gap-1.5 px-4 py-2 rounded-xl text-sm font-bold ${darkMode ? 'bg-red-500/20 text-red-500 border-red-500/30 hover:bg-red-500/30' : 'bg-red-100 text-red-600 border-red-200 hover:bg-red-200'} border transition-all min-h-[44px]`}
-                        aria-label={t.stopSpeakBtn}
-                      >
-                        <VolumeX size={18} /> <span className="hidden md:inline">{t.stopSpeakBtn}</span>
-                      </button>
-                    </>
-                  ) : (
-                    <button 
-                      onClick={() => speakText(outputResult)}
-                      className={`flex items-center gap-1.5 px-4 py-2 rounded-xl text-sm font-bold ${darkMode ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30 hover:bg-emerald-500/30' : 'bg-emerald-100 text-emerald-600 border-emerald-200 hover:bg-emerald-200'} border transition-all min-h-[44px]`}
-                      aria-label={t.speakBtn}
-                    >
-                      <Volume2 size={18} /> <span className="hidden md:inline">{t.speakBtn}</span>
+                      {isRecordingASR ? <MicOff size={15} /> : <Mic size={15} />}
+                      <span>{isRecordingASR ? t.stopRecording : t.startRecording}</span>
                     </button>
-                  )
-                )}
-                <button 
-                  onClick={copyToClipboard}
-                  className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-bold transition-all duration-300 min-h-[44px] ${
-                    copyStatus 
-                    ? (darkMode ? 'bg-indigo-500/20 text-indigo-400 border border-indigo-500/30' : 'bg-indigo-100 text-indigo-600 border border-indigo-200')
-                    : (darkMode ? 'bg-slate-800 hover:bg-slate-700 text-white' : 'bg-slate-200 hover:bg-slate-300 text-slate-700')
-                  }`}
-                  aria-label={t.copy}
-                >
-                  {copyStatus ? <><Check size={18} /> <span className="hidden md:inline">{t.copied}</span></> : <><Copy size={18} /> <span className="hidden md:inline">{t.copy}</span></>}
-                </button>
-                <button 
-                  onClick={downloadOutput}
-                  className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-bold ${darkMode ? 'bg-slate-800 hover:bg-slate-700 text-white' : 'bg-slate-200 hover:bg-slate-300 text-slate-700'} transition-all duration-300 min-h-[44px]`}
-                  aria-label="Download TXT"
-                >
-                  <Download size={18} /> <span className="hidden md:inline">TXT</span>
-                </button>
-                <button 
-                  onClick={downloadOutputDocx}
-                  className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-bold ${darkMode ? 'bg-indigo-600/20 text-indigo-400 border-indigo-500/30 hover:bg-indigo-600/30' : 'bg-indigo-100 text-indigo-600 border-indigo-200 hover:bg-indigo-200'} border transition-all duration-300 min-h-[44px]`}
-                  aria-label="Download DOCX"
-                >
-                  <Download size={18} /> <span className="hidden md:inline">DOCX</span>
-                </button>
-                <button 
-                  onClick={() => setOutputResult('')}
-                  className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-bold ${darkMode ? 'bg-red-500/10 text-red-400 border-red-500/20 hover:bg-red-500/20' : 'bg-red-50 text-red-600 border-red-100 hover:bg-red-100'} border transition-all duration-300 min-h-[44px]`}
-                  aria-label={t.close}
-                >
-                  <X size={18} /> <span className="hidden md:inline">{t.close}</span>
-                </button>
-              </div>
-            </div>
-            
-            <div className={`p-6 md:p-8 ${darkMode ? 'bg-gradient-to-b from-[#121217] to-[#0a0a0f]' : 'bg-white'}`}>
-              {isLoading ? (
-                outputType === 'voice_clone' ? (
-                  <div className="w-full max-w-lg mx-auto py-10 space-y-8">
-                    <div className="flex justify-between items-end">
-                      <div className="space-y-1">
-                        <p className={`text-xs font-bold uppercase tracking-wider ${darkMode ? 'text-rose-500' : 'text-rose-600'}`}>
-                          {language === 'ar' ? "مختبر التركيب الصوتي" : "Synthesis Lab"}
-                        </p>
-                        <p className={`text-base md:text-lg font-bold ${darkMode ? 'text-white' : 'text-slate-900'}`}>
-                          {synthesisStep === 1 && t.synthesisProgress.step1}
-                          {synthesisStep === 2 && t.synthesisProgress.step2}
-                          {synthesisStep === 3 && t.synthesisProgress.step3}
-                          {synthesisStep === 4 && t.synthesisProgress.step4}
-                        </p>
-                      </div>
-                      <span className={`text-3xl font-black ${darkMode ? 'text-rose-500' : 'text-rose-600'}`}>
-                        {synthesisStep * 25}%
-                      </span>
-                    </div>
-                    <div className={`w-full h-4 rounded-full overflow-hidden p-1 ${darkMode ? 'bg-slate-800' : 'bg-slate-100'}`}>
-                      <motion.div 
-                        initial={{ width: 0 }}
-                        animate={{ width: `${synthesisStep * 25}%` }}
-                        className="h-full rounded-full bg-gradient-to-r from-rose-600 via-rose-500 to-rose-400 shadow-[0_0_20px_rgba(225,29,72,0.6)]"
-                      />
-                    </div>
-                    <div className="grid grid-cols-4 gap-3">
-                       {[1, 2, 3, 4].map(s => (
-                         <div key={s} className="space-y-2">
-                           <div className={`h-1.5 rounded-full transition-all duration-500 ${s <= synthesisStep ? 'bg-rose-500 shadow-[0_0_10px_rgba(225,29,72,0.4)]' : (darkMode ? 'bg-slate-800' : 'bg-slate-200')}`} />
-                           <p className={`text-[10px] text-center font-bold font-arabic ${s <= synthesisStep ? (darkMode ? 'text-rose-400' : 'text-rose-600') : 'text-slate-500'}`}>
-                             {s === 1 && "DNA"}
-                             {s === 2 && "Melody"}
-                             {s === 3 && "Merge"}
-                             {s === 4 && "Render"}
-                           </p>
-                         </div>
-                       ))}
-                    </div>
-                  </div>
-                ) : (
-                  <LoadingIndicator 
-                    type={outputType}
-                    task={
-                      outputType === 'song' ? t.loadingComposing :
-                      outputType === 'tashkeel' ? t.loadingDiacritics :
-                      outputType === 'spellcheck' ? t.loadingCorrecting :
-                      outputType === 'analysis' ? t.loadingAnalyzing :
-                      outputType === 'voice_clone' ? t.loadingCloning :
-                      t.loadingProcessing
-                    } 
-                  />
-                )
-              ) : (
-                <div className={`text-[1.3rem] md:text-[1.5rem] leading-[2.2] text-right font-arabic ${darkMode ? 'text-slate-200' : 'text-slate-800'}`}>
-                  {generatedAudioUrl && (
-                    <div className={`mb-6 p-4 rounded-2xl border ${darkMode ? 'bg-slate-800/50 border-slate-700' : 'bg-slate-50 border-slate-200'}`}>
-                       <h3 className={`font-bold mb-3 ${darkMode ? 'text-white' : 'text-slate-800'}`}>
-                         {language === 'ar' ? 'التمثيل الصوتي' : 'Generated Audio'}
-                       </h3>
-                       <audio src={generatedAudioUrl} controls className="w-full rounded-lg" />
-                    </div>
-                  )}
-                  <VirtualizedOutput text={outputResult} type={outputType} />
-                </div>
-              )}
 
-              {outputResult && outputType === 'voice_clone' && !isLoading && (
-                <div className={`mt-8 p-6 rounded-3xl border ${darkMode ? 'bg-emerald-950/20 border-emerald-900/30' : 'bg-emerald-50 border-emerald-100'} flex flex-col md:flex-row items-center justify-between gap-4`}>
-                  <div className="flex items-center gap-4">
-                    <div className={`w-12 h-12 rounded-2xl flex items-center justify-center ${darkMode ? 'bg-emerald-500/20 text-emerald-400' : 'bg-emerald-500 text-white shadow-lg'}`}>
-                      <CheckCircle2 size={24} />
-                    </div>
-                    <div>
-                      <p className={`text-sm font-bold ${darkMode ? 'text-emerald-400' : 'text-emerald-700'}`}>
-                        {t.downloadReady}
-                      </p>
-                      <p className={`text-[10px] md:text-xs font-medium ${darkMode ? 'text-emerald-500/60' : 'text-emerald-600/70'}`}>
-                        {language === 'ar' ? "تم حفظ جميع المعايير والترددات في الملف الفني." : "All parameters and frequencies saved in technical package."}
-                      </p>
+                    <button
+                      onClick={toggleLiveDictation}
+                      className={`h-10 px-3.5 rounded-xl text-xs font-semibold border transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 ${
+                        isDictatingLive
+                          ? 'border-red-500 bg-red-50 dark:bg-red-950/40 text-red-600 dark:text-red-400'
+                          : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800/70 text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800'
+                      }`}
+                    >
+                      <AudioLines size={14} />
+                      <span>{t.dictateLive}</span>
+                    </button>
+
+                    <label className="inline-flex items-center gap-2 text-xs font-medium text-slate-600 dark:text-slate-400 cursor-pointer ps-2 select-none">
+                      <input
+                        type="checkbox"
+                        checked={autoRead}
+                        onChange={(e) => setAutoRead(e.target.checked)}
+                        className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+                      />
+                      <span>{t.autoReadLabel}</span>
+                    </label>
+                  </div>
+
+                  {/* Clean inline example shortcuts */}
+                  <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+                    <span className="text-slate-400 dark:text-slate-500 font-medium">{t.examples}</span>
+                    {[
+                      {
+                        label: t.exDiacritics,
+                        text:
+                          language === 'ar'
+                            ? 'ده اللي خلقنا مش هينسانا، قادر يقوينا على ما بلانا، اللي قدر في يوم لقانا قادر يهديك زي ما هدانا'
+                            : 'This is an Egyptian colloquial sentence for smart diacritics',
+                      },
+                      {
+                        label: t.exSong,
+                        text:
+                          language === 'ar'
+                            ? 'قصة شاب بيكافح في زحمة القاهرة وعنده طموح كبير'
+                            : 'Story of a young man struggling in Cairo traffic with big ambition',
+                      },
+                      {
+                        label: t.exMahragan,
+                        text:
+                          language === 'ar'
+                            ? 'اكتب مهرجان عن الصحاب الجدعة والرجولة في وقت الشدة'
+                            : 'Write a Mahragan about loyal friends in tough times',
+                      },
+                    ].map((ex, i) => (
+                      <button
+                        key={i}
+                        type="button"
+                        onClick={() => setInputText(ex.text)}
+                        className="text-indigo-600 dark:text-indigo-400 hover:underline font-medium whitespace-nowrap"
+                      >
+                        {ex.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <hr className="border-slate-200 dark:border-slate-800" />
+
+                {/* =========================================================== */}
+                {/* ORGANIZED STUDIO ACTION BAR 1: Diacritics & Proofreading    */}
+                {/* =========================================================== */}
+                <div className="space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <h3 className="text-xs font-bold text-slate-500 dark:text-slate-400">
+                      {t.diacriticsSection}
+                    </h3>
+                  </div>
+
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                    <button
+                      onClick={() => handleDiacriticsAction('smart_light')}
+                      disabled={isLoading || !inputText.trim()}
+                      className="h-11 px-3 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs sm:text-sm font-semibold flex items-center justify-center gap-2 transition-colors disabled:opacity-40 whitespace-nowrap"
+                    >
+                      <Sparkles size={15} className="shrink-0" />
+                      <span className="truncate">{t.lightDiacriticsBtn}</span>
+                    </button>
+
+                    <button
+                      onClick={() => handleDiacriticsAction('phonetic_suno')}
+                      disabled={isLoading || !inputText.trim()}
+                      className="h-11 px-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/80 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-800 dark:text-slate-100 text-xs sm:text-sm font-semibold flex items-center justify-center gap-2 transition-colors disabled:opacity-40 whitespace-nowrap"
+                    >
+                      <Feather size={15} className="shrink-0 text-indigo-500" />
+                      <span className="truncate">{t.phoneticDiacriticsBtn}</span>
+                    </button>
+
+                    <button
+                      onClick={() => handleDiacriticsAction('connected')}
+                      disabled={isLoading || !inputText.trim()}
+                      className="h-11 px-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/80 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-800 dark:text-slate-100 text-xs sm:text-sm font-semibold flex items-center justify-center gap-2 transition-colors disabled:opacity-40 whitespace-nowrap"
+                    >
+                      <Sliders size={15} className="shrink-0 text-indigo-500" />
+                      <span className="truncate">{t.connectedDiacriticsBtn}</span>
+                    </button>
+
+                    <button
+                      onClick={() => handleDiacriticsAction('clean_standard')}
+                      disabled={isLoading || !inputText.trim()}
+                      className="h-11 px-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/80 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-800 dark:text-slate-100 text-xs sm:text-sm font-semibold flex items-center justify-center gap-2 transition-colors disabled:opacity-40 whitespace-nowrap"
+                    >
+                      <Check size={15} className="shrink-0 text-indigo-500" />
+                      <span className="truncate">{t.cleanStandardBtn}</span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* =========================================================== */}
+                {/* ORGANIZED STUDIO ACTION BAR 2: Songwriting & Music Tools    */}
+                {/* =========================================================== */}
+                <div className="space-y-3 pt-1">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <h3 className="text-xs font-bold text-slate-500 dark:text-slate-400">
+                      {t.songwritingSection}
+                    </h3>
+
+                    {/* Clean Compact Genre Dropdown replacing the 19-button wall */}
+                    <div className="flex items-center gap-2">
+                      <label
+                        htmlFor="studio-genre-select"
+                        className="text-xs font-medium text-slate-500 dark:text-slate-400 whitespace-nowrap"
+                      >
+                        {t.genreLabel}:
+                      </label>
+                      <div className="relative">
+                        <select
+                          id="studio-genre-select"
+                          value={genre}
+                          onChange={(e) => setGenre(e.target.value)}
+                          className="h-9 ps-3 pe-8 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#0B0D11] text-xs font-semibold text-slate-800 dark:text-slate-200 appearance-none cursor-pointer"
+                        >
+                          {Object.entries(t.genres).map(([id, label]) => (
+                            <option key={id} value={id}>
+                              {label}
+                            </option>
+                          ))}
+                        </select>
+                        <ChevronDown
+                          size={14}
+                          className="pointer-events-none absolute top-1/2 -translate-y-1/2 end-2.5 text-slate-400"
+                        />
+                      </div>
                     </div>
                   </div>
-                  <button 
-                    onClick={downloadResult}
-                    className={`px-8 py-3.5 rounded-xl font-bold flex items-center gap-2 transition-all shadow-xl ${darkMode ? 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-emerald-900/40' : 'bg-emerald-600 hover:bg-emerald-700 text-white shadow-emerald-500/30'} active:scale-95`}
+
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <p className="text-xs text-slate-500 dark:text-slate-400">
+                      {t.genreDescriptions[genre as keyof typeof t.genreDescriptions]}
+                    </p>
+                    <label className="inline-flex items-center gap-2 text-xs font-medium text-slate-600 dark:text-slate-400 cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        checked={sunoWebSearch}
+                        onChange={(e) => setSunoWebSearch(e.target.checked)}
+                        className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+                      />
+                      <Globe size={13} className="text-indigo-500 shrink-0" />
+                      <span>{t.sunoWebSearchLabel}</span>
+                    </label>
+                  </div>
+
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5">
+                    <button
+                      onClick={() => handleLyricsAction('compose_song')}
+                      disabled={isLoading || !inputText.trim()}
+                      className="h-11 px-3 rounded-xl border border-indigo-600/30 dark:border-indigo-500/40 bg-indigo-50 dark:bg-indigo-950/30 hover:bg-indigo-100 dark:hover:bg-indigo-950/50 text-indigo-700 dark:text-indigo-300 text-xs sm:text-sm font-semibold flex items-center justify-center gap-2 transition-colors disabled:opacity-40 whitespace-nowrap"
+                    >
+                      <Music size={15} className="shrink-0" />
+                      <span className="truncate">{t.composeBtn}</span>
+                    </button>
+
+                    <button
+                      onClick={() => handleLyricsAction('write_lyrics')}
+                      disabled={isLoading || !inputText.trim()}
+                      className="h-11 px-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800/60 hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-800 dark:text-slate-100 text-xs sm:text-sm font-semibold flex items-center justify-center gap-2 transition-colors disabled:opacity-40 whitespace-nowrap"
+                    >
+                      <Feather size={15} className="shrink-0 text-slate-500" />
+                      <span className="truncate">{t.writeLyricsBtn}</span>
+                    </button>
+
+                    <button
+                      onClick={() => handleLyricsAction('format_lyrics')}
+                      disabled={isLoading || (!inputText.trim() && !outputResult.trim())}
+                      className="h-11 px-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800/60 hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-800 dark:text-slate-100 text-xs sm:text-sm font-semibold flex items-center justify-center gap-2 transition-colors disabled:opacity-40 whitespace-nowrap"
+                    >
+                      <BookOpen size={15} className="shrink-0 text-slate-500" />
+                      <span className="truncate">{t.formatLyricsBtn}</span>
+                    </button>
+
+                    <button
+                      onClick={() => handleLyricsAction('analyze_lyrics')}
+                      disabled={isLoading || (!inputText.trim() && !outputResult.trim())}
+                      className="h-11 px-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800/60 hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-800 dark:text-slate-100 text-xs sm:text-sm font-semibold flex items-center justify-center gap-2 transition-colors disabled:opacity-40 whitespace-nowrap"
+                    >
+                      <Search size={15} className="shrink-0 text-slate-500" />
+                      <span className="truncate">{t.analyzeLyricsBtn}</span>
+                    </button>
+
+                    <button
+                      onClick={() => setShowSunoModal(true)}
+                      disabled={isLoading}
+                      className="h-11 px-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800/60 hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-800 dark:text-slate-100 text-xs sm:text-sm font-semibold flex items-center justify-center gap-2 transition-colors disabled:opacity-40 whitespace-nowrap"
+                    >
+                      <Headphones size={15} className="shrink-0 text-slate-500" />
+                      <span className="truncate">{t.sunoPromptBtn}</span>
+                    </button>
+
+                    <button
+                      onClick={() => setShowVoiceCloneModal(true)}
+                      disabled={isLoading}
+                      className="h-11 px-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800/60 hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-800 dark:text-slate-100 text-xs sm:text-sm font-semibold flex items-center justify-center gap-2 transition-colors disabled:opacity-40 whitespace-nowrap"
+                    >
+                      <Mic size={15} className="shrink-0 text-slate-500" />
+                      <span className="truncate">{t.voiceCloneBtn}</span>
+                    </button>
+                  </div>
+                </div>
+              </section>
+
+              {/* Output Panel */}
+              {renderOutputPanel()}
+            </div>
+
+            {/* Linguistic Tools & History Sidebar (4 cols) */}
+            <aside className="lg:col-span-4 space-y-6">
+              {/* 1. Diacritics Inspector (Script + Search Model) */}
+              <section className="bg-white dark:bg-[#13161C] border border-slate-200 dark:border-slate-800 rounded-2xl p-5 shadow-sm space-y-4">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <h2 className="text-sm font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
+                    <Search size={16} className="text-indigo-600 dark:text-indigo-400" />
+                    <span>{t.inspectorTitle}</span>
+                  </h2>
+                  {renderInlineSlotSelector('diacritics_search')}
+                </div>
+
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={searchWord}
+                    onChange={(e) => setSearchWord(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') handleWordSearch();
+                    }}
+                    placeholder={t.inspectorPlaceholder}
+                    className="flex-1 h-10 px-3.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#0B0D11] text-sm text-slate-900 dark:text-slate-100 focus:border-indigo-500"
+                  />
+                  <button
+                    onClick={() => handleWordSearch()}
+                    disabled={isSearchingWord || !searchWord.trim()}
+                    className="h-10 px-4 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold flex items-center gap-1.5 transition-colors disabled:opacity-40 whitespace-nowrap shrink-0"
                   >
-                    <Download size={18} />
-                    {t.exportBtn}
+                    {isSearchingWord ? (
+                      <RefreshCw size={14} className="animate-spin" />
+                    ) : (
+                      <BookOpen size={14} />
+                    )}
+                    <span>{t.getDiacritics}</span>
                   </button>
                 </div>
+
+                <AnimatePresence mode="wait">
+                  {wordSuggestions && (
+                    <motion.div
+                      initial={{ opacity: 0, y: 6 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      exit={{ opacity: 0 }}
+                      className="space-y-3 pt-1"
+                    >
+                      {wordSuggestions.suggestions && (
+                        <div className="space-y-2 max-h-80 overflow-y-auto pe-1 custom-scrollbar">
+                          {wordSuggestions.suggestions.map((item: any, idx: number) => (
+                            <div
+                              key={idx}
+                              className="flex items-start justify-between gap-2 p-3 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#0B0D11]"
+                            >
+                              <div className="min-w-0">
+                                <div className="flex flex-wrap items-baseline gap-2">
+                                  <span className="text-lg font-bold text-indigo-600 dark:text-indigo-400 font-arabic">
+                                    {item.word}
+                                  </span>
+                                  {item.typeLabel && (
+                                    <span className="text-[11px] text-slate-500 dark:text-slate-400">
+                                      · {item.typeLabel}
+                                    </span>
+                                  )}
+                                </div>
+                                <p className="text-xs text-slate-600 dark:text-slate-400 mt-1 leading-relaxed">
+                                  {item.meaning}
+                                </p>
+                              </div>
+                              <button
+                                onClick={() => speakText(item.word)}
+                                className="h-9 w-9 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:text-indigo-600 dark:hover:text-indigo-400 flex items-center justify-center shrink-0 transition-colors"
+                                aria-label={t.speakBtn}
+                              >
+                                <Volume2 size={15} />
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
+                      {wordSuggestions.synonyms?.length > 0 && (
+                        <div className="pt-2 border-t border-slate-200 dark:border-slate-800">
+                          <p className="text-xs font-semibold text-slate-500 dark:text-slate-400 mb-2">
+                            {t.synonyms}
+                          </p>
+                          <div className="flex flex-wrap gap-1.5">
+                            {wordSuggestions.synonyms.map((s: string, i: number) => (
+                              <button
+                                key={i}
+                                onClick={() => {
+                                  setSearchWord(s);
+                                  handleWordSearch(s);
+                                }}
+                                className="px-2.5 py-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/70 text-xs font-medium text-slate-700 dark:text-slate-200 hover:border-indigo-500 transition-colors"
+                              >
+                                {s}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {wordSuggestions.antonyms?.length > 0 && (
+                        <div className="pt-2 border-t border-slate-200 dark:border-slate-800">
+                          <p className="text-xs font-semibold text-slate-500 dark:text-slate-400 mb-2">
+                            {t.antonyms}
+                          </p>
+                          <div className="flex flex-wrap gap-1.5">
+                            {wordSuggestions.antonyms.map((a: string, i: number) => (
+                              <button
+                                key={i}
+                                onClick={() => {
+                                  setSearchWord(a);
+                                  handleWordSearch(a);
+                                }}
+                                className="px-2.5 py-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/70 text-xs font-medium text-slate-700 dark:text-slate-200 hover:border-indigo-500 transition-colors"
+                              >
+                                {a}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {wordSuggestions.sourcesChecked?.length > 0 && (
+                        <p className="text-[11px] text-slate-400 dark:text-slate-500 pt-1">
+                          {t.sourcesChecked}: {wordSuggestions.sourcesChecked.join(' · ')}
+                        </p>
+                      )}
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+              </section>
+
+              {/* 2. Rhymes & Line Rewriter (Tabbed Unified Card) */}
+              <section className="bg-white dark:bg-[#13161C] border border-slate-200 dark:border-slate-800 rounded-2xl p-5 shadow-sm space-y-4">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs font-bold text-slate-700 dark:text-slate-200">
+                    {toolSubTab === 'rhymes' ? t.rhymesTab : t.rewriteTab}
+                  </span>
+                  {renderInlineSlotSelector('rhyme_rewrite')}
+                </div>
+                <div className="flex items-center p-1 rounded-xl bg-slate-100 dark:bg-[#0B0D11] border border-slate-200 dark:border-slate-800">
+                  <button
+                    onClick={() => setToolSubTab('rhymes')}
+                    className={`flex-1 py-2 rounded-lg text-xs font-semibold transition-colors ${
+                      toolSubTab === 'rhymes'
+                        ? 'bg-white dark:bg-slate-800 text-slate-900 dark:text-white shadow-xs'
+                        : 'text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200'
+                    }`}
+                  >
+                    {t.rhymesTab}
+                  </button>
+                  <button
+                    onClick={() => setToolSubTab('rewrite')}
+                    className={`flex-1 py-2 rounded-lg text-xs font-semibold transition-colors ${
+                      toolSubTab === 'rewrite'
+                        ? 'bg-white dark:bg-slate-800 text-slate-900 dark:text-white shadow-xs'
+                        : 'text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200'
+                    }`}
+                  >
+                    {t.rewriteTab}
+                  </button>
+                </div>
+
+                {toolSubTab === 'rhymes' ? (
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      value={rhymeWord}
+                      onChange={(e) => setRhymeWord(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') handleFindRhymes();
+                      }}
+                      placeholder={t.rhymePlaceholder}
+                      className="flex-1 h-10 px-3.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#0B0D11] text-sm text-slate-900 dark:text-slate-100 focus:border-indigo-500"
+                    />
+                    <button
+                      onClick={handleFindRhymes}
+                      disabled={isLoading || !rhymeWord.trim()}
+                      className="h-10 px-4 rounded-xl bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 hover:bg-slate-800 dark:hover:bg-white text-xs font-semibold transition-colors disabled:opacity-40 whitespace-nowrap shrink-0"
+                    >
+                      {t.rhymes}
+                    </button>
+                  </div>
+                ) : (
+                  <div className="space-y-2.5">
+                    <input
+                      type="text"
+                      value={lineToRewrite}
+                      onChange={(e) => setLineToRewrite(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') handleRewriteLine();
+                      }}
+                      placeholder={t.rewritePlaceholder}
+                      className="w-full h-10 px-3.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#0B0D11] text-sm text-slate-900 dark:text-slate-100 focus:border-indigo-500"
+                    />
+                    <button
+                      onClick={handleRewriteLine}
+                      disabled={isLoading || !lineToRewrite.trim()}
+                      className="w-full h-10 px-4 rounded-xl bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 hover:bg-slate-800 dark:hover:bg-white text-xs font-semibold transition-colors disabled:opacity-40"
+                    >
+                      {t.rewrite}
+                    </button>
+                  </div>
+                )}
+              </section>
+
+              {/* 3. Recent History (Single Clean List — No Duplication!) */}
+              {history.length > 0 && (
+                <section className="bg-white dark:bg-[#13161C] border border-slate-200 dark:border-slate-800 rounded-2xl p-5 shadow-sm space-y-3">
+                  <div className="flex items-center justify-between">
+                    <h2 className="text-sm font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
+                      <HistoryIcon size={16} className="text-slate-500" />
+                      <span>{t.recentHistory}</span>
+                    </h2>
+                    <button
+                      onClick={() => setHistory([])}
+                      className="text-xs font-medium text-red-500 hover:underline"
+                    >
+                      {t.clearHistory}
+                    </button>
+                  </div>
+
+                  <div className="space-y-2 max-h-72 overflow-y-auto pe-1 custom-scrollbar">
+                    {history.slice(0, 12).map((item) => (
+                      <button
+                        key={item.id}
+                        onClick={() => {
+                          setInputText(item.input);
+                          setOutputResult(item.output);
+                          setOutputType(item.type);
+                        }}
+                        className="w-full text-start p-3 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#0B0D11] hover:border-indigo-500/60 transition-colors"
+                      >
+                        <div className="flex items-center justify-between gap-2 text-[11px] text-slate-500 dark:text-slate-400 mb-1">
+                          <span className="font-semibold text-indigo-600 dark:text-indigo-400">
+                            {item.type}
+                          </span>
+                          <span className="font-mono tabular-nums">
+                            {new Date(item.timestamp).toLocaleTimeString(
+                              language === 'ar' ? 'ar-EG' : 'en-US',
+                              { hour: '2-digit', minute: '2-digit' }
+                            )}
+                          </span>
+                        </div>
+                        <p className="text-xs font-medium text-slate-700 dark:text-slate-300 truncate">
+                          {item.input}
+                        </p>
+                      </button>
+                    ))}
+                  </div>
+                </section>
               )}
-            </div>
-            
-            {outputType === 'song' && (
-              <div className={`p-4 ${darkMode ? 'bg-indigo-950/20 border-indigo-900/30 text-indigo-300/80' : 'bg-indigo-50 border-indigo-100 text-indigo-600/80'} border-t flex items-start gap-3`}>
-                <Info size={18} className="shrink-0 mt-0.5" />
-                <p className="text-xs md:text-sm font-medium leading-relaxed">
-                  <strong className={darkMode ? 'text-indigo-300' : 'text-indigo-700'}>{t.note}</strong> {t.noteText}
-                </p>
-              </div>
-            )}
-
-            {outputType === 'voice_clone' && (
-              <div className={`p-4 ${darkMode ? 'bg-rose-950/20 border-rose-900/30 text-rose-300/80' : 'bg-rose-50 border-rose-100 text-rose-600/80'} border-t flex items-start gap-3`}>
-                <Info size={18} className="shrink-0 mt-0.5" />
-                <p className="text-xs md:text-sm font-medium leading-relaxed">
-                  <strong className={darkMode ? 'text-rose-300' : 'text-rose-700'}>{t.note}</strong> {t.voiceMatchNote}
-                </p>
-              </div>
-            )}
+            </aside>
           </div>
         )}
 
-        {/* History Section */}
-        {history.length > 0 && (
-          <div className="mt-8 border-t pt-6">
-            <div className="flex items-center justify-between mb-4">
-              <h3 className={`text-lg font-bold ${darkMode ? 'text-slate-300' : 'text-slate-700'} flex items-center gap-2`}>
-                <HistoryIcon size={20} /> {language === 'ar' ? 'السجل الأخير' : 'Recent History'}
-              </h3>
-              <button 
-                onClick={() => setHistory([])}
-                className="text-xs text-red-400 hover:text-red-500 font-bold"
-              >
-                {language === 'ar' ? 'مسح السجل' : 'Clear History'}
-              </button>
-            </div>
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-              {history.map((item) => (
+        {/* =================================================================== */}
+        {/* TAB 2: AUDIO, YOUTUBE & WEB LYRICS AGENT                            */}
+        {/* =================================================================== */}
+        {activeTab === 'audio' && (
+          <div className="max-w-4xl mx-auto space-y-6">
+            <section className="bg-white dark:bg-[#13161C] border border-slate-200 dark:border-slate-800 rounded-2xl p-6 shadow-sm space-y-5">
+              <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-slate-200 dark:border-slate-800">
+                {renderInlineSlotSelector('asr_diacritics', language === 'ar' ? 'موديل السمع (ASR):' : 'ASR Model:')}
+                {renderInlineSlotSelector('tts_reader', language === 'ar' ? 'موديل القراءة (TTS):' : 'TTS Model:')}
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <button
+                    onClick={() => fileInputRef.current?.click()}
+                    className="w-full h-12 px-4 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#0B0D11] hover:bg-slate-100 dark:hover:bg-slate-800 text-sm font-semibold text-slate-800 dark:text-slate-100 flex items-center justify-center gap-2 transition-colors"
+                  >
+                    <Upload size={17} />
+                    <span>{audioFile ? t.changeAudio : t.uploadAudio}</span>
+                  </button>
+                  <input
+                    type="file"
+                    ref={fileInputRef}
+                    onChange={handleAudioUpload}
+                    accept="audio/*"
+                    className="hidden"
+                    aria-label={t.uploadAudio}
+                  />
+                  {audioFile && (
+                    <div className="mt-2 flex items-center justify-between text-xs text-emerald-600 dark:text-emerald-400 font-medium px-1">
+                      <span className="truncate">{audioFile.name}</span>
+                      <span className="font-mono tabular-nums" dir="ltr">
+                        {audioFile.size >= 1024 * 1024
+                          ? `${(audioFile.size / (1024 * 1024)).toFixed(1)} MB`
+                          : `${Math.max(1, Math.round(audioFile.size / 1024))} KB`}
+                      </span>
+                    </div>
+                  )}
+                </div>
+
+                <div className="relative">
+                  <input
+                    type="text"
+                    value={youtubeLink}
+                    onChange={(e) => setYoutubeLink(e.target.value)}
+                    placeholder={t.youtubeLinkPlaceholder}
+                    className="w-full h-12 ps-10 pe-4 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#0B0D11] text-sm text-slate-900 dark:text-slate-100 focus:border-indigo-500"
+                  />
+                  <Youtube
+                    size={18}
+                    className="absolute top-1/2 -translate-y-1/2 start-3.5 text-slate-400"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5 pt-2 border-t border-slate-200 dark:border-slate-800">
                 <button
-                  key={item.id}
-                  onClick={() => {
-                    setInputText(item.input);
-                    setOutputResult(item.output);
-                    setOutputType(item.type);
-                    window.scrollTo({ top: 0, behavior: 'smooth' });
-                  }}
-                  className={`text-right p-3 rounded-xl border transition-all ${
-                    darkMode ? 'bg-[#1a1a24] border-slate-800 hover:border-indigo-500/50' : 'bg-white border-slate-200 hover:border-indigo-400'
-                  } group`}
+                  onClick={() => processAudioASR('egyptian')}
+                  disabled={isLoading || !audioFile}
+                  className="h-11 px-4 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs sm:text-sm font-semibold flex items-center justify-center gap-2 transition-colors disabled:opacity-40 whitespace-nowrap"
                 >
-                  <div className="flex items-center justify-between mb-1">
-                    <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
-                      darkMode ? 'bg-indigo-900/40 text-indigo-300' : 'bg-indigo-50 text-indigo-600'
-                    }`}>
-                      {item.type}
+                  <FileAudio size={15} />
+                  <span>{t.transcribeEgyptian}</span>
+                </button>
+
+                <button
+                  onClick={() => processAudioASR('general')}
+                  disabled={isLoading || !audioFile}
+                  className="h-11 px-4 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/80 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-800 dark:text-slate-100 text-xs sm:text-sm font-semibold flex items-center justify-center gap-2 transition-colors disabled:opacity-40 whitespace-nowrap"
+                >
+                  <FileAudio size={15} />
+                  <span>{t.transcribeGeneral}</span>
+                </button>
+
+                <button
+                  onClick={() => processAudioASR('clean_standard')}
+                  disabled={isLoading || !audioFile}
+                  className="h-11 px-4 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/80 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-800 dark:text-slate-100 text-xs sm:text-sm font-semibold flex items-center justify-center gap-2 transition-colors disabled:opacity-40 whitespace-nowrap"
+                >
+                  <Eraser size={15} />
+                  <span>{t.cleanStandardAudioBtn}</span>
+                </button>
+
+                <button
+                  onClick={() => handleAudioMusicAnalysis('suno_1000')}
+                  disabled={isLoading || (!audioFile && !youtubeLink.trim())}
+                  className="h-11 px-4 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/80 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-800 dark:text-slate-100 text-xs sm:text-sm font-semibold flex items-center justify-center gap-2 transition-colors disabled:opacity-40 whitespace-nowrap"
+                >
+                  <Music size={15} />
+                  <span>{t.analyzeMusic}</span>
+                </button>
+
+                <button
+                  onClick={() => handleAudioMusicAnalysis('deep_analysis')}
+                  disabled={isLoading || (!audioFile && !youtubeLink.trim())}
+                  className="h-11 px-4 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/80 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-800 dark:text-slate-100 text-xs sm:text-sm font-semibold flex items-center justify-center gap-2 transition-colors disabled:opacity-40 whitespace-nowrap"
+                >
+                  <Search size={15} />
+                  <span>{t.deepMusicAnalysisBtn}</span>
+                </button>
+              </div>
+            </section>
+
+            {/* Web Lyrics & Song Scraper AI Agent Card */}
+            <section className="bg-white dark:bg-[#13161C] border border-slate-200 dark:border-slate-800 rounded-2xl p-6 shadow-sm space-y-4">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <h2 className="text-base font-bold text-slate-900 dark:text-white flex items-center gap-2">
+                    <Globe size={18} className="text-indigo-600 dark:text-indigo-400" />
+                    <span>{t.webAgentTitle}</span>
+                  </h2>
+                  <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">{t.webAgentSubtitle}</p>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-3">
+                  {renderInlineSlotSelector('web_lyrics_agent')}
+                  <div className="inline-flex items-center p-0.5 rounded-lg bg-slate-100 dark:bg-[#0B0D11] border border-slate-200 dark:border-slate-800">
+                  <button
+                    type="button"
+                    onClick={() => setWebAgentMode('url')}
+                    className={`px-3 py-1.5 rounded-md text-xs font-semibold transition-colors whitespace-nowrap ${
+                      webAgentMode === 'url'
+                        ? 'bg-white dark:bg-slate-800 text-indigo-600 dark:text-indigo-400 shadow-xs'
+                        : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
+                    }`}
+                  >
+                    {t.webAgentModeUrl}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setWebAgentMode('search')}
+                    className={`px-3 py-1.5 rounded-md text-xs font-semibold transition-colors whitespace-nowrap ${
+                      webAgentMode === 'search'
+                        ? 'bg-white dark:bg-slate-800 text-indigo-600 dark:text-indigo-400 shadow-xs'
+                        : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
+                    }`}
+                  >
+                    {t.webAgentModeSearch}
+                  </button>
+                  </div>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
+                <div className="md:col-span-7">
+                  <input
+                    type={webAgentMode === 'url' ? 'url' : 'text'}
+                    value={webAgentMode === 'url' ? webAgentUrl : webAgentQuery}
+                    onChange={(e) =>
+                      webAgentMode === 'url'
+                        ? setWebAgentUrl(e.target.value)
+                        : setWebAgentQuery(e.target.value)
+                    }
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') handleRunWebAgent();
+                    }}
+                    placeholder={
+                      webAgentMode === 'url' ? t.webAgentUrlPlaceholder : t.webAgentQueryPlaceholder
+                    }
+                    dir={webAgentMode === 'url' ? 'ltr' : undefined}
+                    className="w-full h-11 px-3.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#0B0D11] text-sm text-slate-900 dark:text-slate-100 focus:border-indigo-500"
+                  />
+                </div>
+
+                <div className="md:col-span-5 flex gap-2">
+                  <div className="relative flex-1">
+                    <select
+                      value={webAgentTask}
+                      onChange={(e) => setWebAgentTask(e.target.value as WebAgentTask)}
+                      aria-label={t.webAgentTaskLabel}
+                      className="w-full h-11 ps-3 pe-8 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#0B0D11] text-xs font-semibold text-slate-800 dark:text-slate-200 appearance-none cursor-pointer"
+                    >
+                      <option value="extract_lyrics">{t.webAgentTaskExtract}</option>
+                      <option value="diacritize_smart">{t.webAgentTaskSmart}</option>
+                      <option value="phonetic_suno">{t.webAgentTaskPhonetic}</option>
+                      <option value="analyze_and_prompt">{t.webAgentTaskPrompt}</option>
+                      <option value="custom">{t.webAgentTaskCustom}</option>
+                    </select>
+                    <ChevronDown
+                      size={14}
+                      className="pointer-events-none absolute top-1/2 -translate-y-1/2 end-2.5 text-slate-400"
+                    />
+                  </div>
+
+                  <button
+                    onClick={handleRunWebAgent}
+                    disabled={
+                      isLoading ||
+                      (webAgentMode === 'url' ? !webAgentUrl.trim() : !webAgentQuery.trim())
+                    }
+                    className="h-11 px-4 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs sm:text-sm font-semibold flex items-center gap-2 transition-colors disabled:opacity-40 whitespace-nowrap shrink-0"
+                  >
+                    <Globe size={15} />
+                    <span>{t.webAgentRunBtn}</span>
+                  </button>
+                </div>
+              </div>
+
+              {webAgentTask === 'custom' && (
+                <input
+                  type="text"
+                  value={webAgentCustomInstruction}
+                  onChange={(e) => setWebAgentCustomInstruction(e.target.value)}
+                  placeholder={t.webAgentCustomPlaceholder}
+                  className="w-full h-10 px-3.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#0B0D11] text-sm text-slate-900 dark:text-slate-100 focus:border-indigo-500"
+                />
+              )}
+
+              {webSearchHits.length > 0 && (
+                <div className="pt-3 border-t border-slate-200 dark:border-slate-800 space-y-2">
+                  {webSearchHits.slice(0, 4).map((hit, i) => (
+                    <div
+                      key={i}
+                      className="p-3 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#0B0D11] flex items-start justify-between gap-3"
+                    >
+                      <div className="min-w-0">
+                        <a
+                          href={hit.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-xs font-semibold text-indigo-600 dark:text-indigo-400 hover:underline inline-flex items-center gap-1"
+                        >
+                          <span className="truncate">{hit.title}</span>
+                          <ExternalLink size={12} className="shrink-0" />
+                        </a>
+                        {hit.snippet && (
+                          <p className="text-xs text-slate-500 dark:text-slate-400 mt-1 line-clamp-2">
+                            {hit.snippet}
+                          </p>
+                        )}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setWebAgentMode('url');
+                          setWebAgentUrl(hit.url);
+                        }}
+                        className="h-8 px-2.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-[11px] font-semibold text-slate-700 dark:text-slate-200 hover:border-indigo-500 whitespace-nowrap shrink-0"
+                      >
+                        {t.webAgentModeUrl}
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </section>
+
+            {renderOutputPanel()}
+          </div>
+        )}
+
+        {/* =================================================================== */}
+        {/* TAB 3: DIRECT LOCAL DISK MODELS, HOST MACHINE & 8-SLOT SELECTORS    */}
+        {/* =================================================================== */}
+        {activeTab === 'models' && (
+          <div className="max-w-6xl mx-auto space-y-6">
+            {/* 1. Direct Local Disk Models Hub (Zero External API Needed) */}
+            <section className="bg-white dark:bg-[#13161C] border border-slate-200 dark:border-slate-800 rounded-2xl p-6 shadow-sm space-y-5">
+              <div className="flex flex-wrap items-start justify-between gap-4">
+                <div className="max-w-2xl">
+                  <h2 className="text-base font-bold text-slate-900 dark:text-white flex items-center gap-2">
+                    <FolderOpen size={18} className="text-indigo-600 dark:text-indigo-400 shrink-0" />
+                    <span>{t.localDiskHubTitle}</span>
+                  </h2>
+                  <p className="text-xs text-slate-500 dark:text-slate-400 mt-1.5 leading-relaxed">
+                    {t.localDiskHubSubtitle}
+                  </p>
+                </div>
+
+                <button
+                  onClick={fetchModelsStatus}
+                  disabled={isLoadingModels}
+                  className="h-10 px-4 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 text-xs font-semibold flex items-center gap-2 transition-colors whitespace-nowrap shrink-0"
+                >
+                  <RefreshCw size={14} className={isLoadingModels ? 'animate-spin' : ''} />
+                  <span>{t.refreshModels}</span>
+                </button>
+              </div>
+
+              {/* Local Models Folder Root Path Input + Scan */}
+              <div className="flex flex-wrap items-center gap-2.5">
+                <label
+                  htmlFor="local-models-root-input"
+                  className="text-xs font-semibold text-slate-700 dark:text-slate-300 whitespace-nowrap"
+                >
+                  {t.localModelsRootLabel}
+                </label>
+                <input
+                  id="local-models-root-input"
+                  type="text"
+                  value={localModelsRootInput}
+                  onChange={(e) => setLocalModelsRootInput(e.target.value)}
+                  placeholder={t.localModelsRootPlaceholder}
+                  dir="ltr"
+                  className="flex-1 min-w-[240px] h-10 px-3.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#0B0D11] text-xs font-mono text-slate-800 dark:text-slate-200 focus:border-indigo-500"
+                />
+                <button
+                  type="button"
+                  onClick={handleSetLocalModelsRoot}
+                  disabled={isScanningDisk}
+                  className="h-10 px-4 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold flex items-center gap-2 transition-colors disabled:opacity-40 whitespace-nowrap shrink-0"
+                >
+                  <RefreshCw size={14} className={isScanningDisk ? 'animate-spin' : ''} />
+                  <span>{isScanningDisk ? t.scanningDiskModels : t.scanDiskModelsBtn}</span>
+                </button>
+              </div>
+
+              {/* Real Host Machine Facts & Python ML Packages Readiness */}
+              {machineEnv && (
+                <div className="space-y-4 pt-3 border-t border-slate-200 dark:border-slate-800">
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-xs">
+                    <div>
+                      <span className="text-slate-500 dark:text-slate-400 block mb-0.5">{t.cpuCores}</span>
+                      <span className="font-mono font-semibold text-slate-900 dark:text-slate-100 tabular-nums" dir="ltr">
+                        {machineEnv.cpuCores} Cores · {machineEnv.arch}
+                      </span>
+                    </div>
+                    <div>
+                      <span className="text-slate-500 dark:text-slate-400 block mb-0.5">{t.ramMemory}</span>
+                      <span className="font-mono font-semibold text-slate-900 dark:text-slate-100 tabular-nums" dir="ltr">
+                        {machineEnv.freeMemoryGb} / {machineEnv.totalMemoryGb} GB
+                      </span>
+                    </div>
+                    <div>
+                      <span className="text-slate-500 dark:text-slate-400 block mb-0.5">{t.pythonRuntime}</span>
+                      <span
+                        className={`font-mono font-semibold ${
+                          machineEnv.pythonAvailable
+                            ? 'text-emerald-600 dark:text-emerald-400'
+                            : 'text-amber-600 dark:text-amber-400'
+                        }`}
+                        dir="ltr"
+                      >
+                        {machineEnv.pythonAvailable
+                          ? machineEnv.pythonVersion || t.pythonReady
+                          : t.pythonNotFound}
+                      </span>
+                    </div>
+                    <div>
+                      <span className="text-slate-500 dark:text-slate-400 block mb-0.5">{t.cloudFallbackKey}</span>
+                      <span className="font-semibold text-slate-900 dark:text-slate-100">
+                        {machineEnv.geminiKeyConfigured ? t.keyActive : t.keyMissing}
+                      </span>
+                    </div>
+                  </div>
+
+                  {machineEnv.pythonPackages && (
+                    <div className="pt-3 border-t border-slate-200/70 dark:border-slate-800/70 flex flex-wrap items-center justify-between gap-3">
+                      <span className="text-xs font-semibold text-slate-600 dark:text-slate-400">
+                        {t.pythonLibrariesLabel}:
+                      </span>
+                      <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs font-mono" dir="ltr">
+                        {Object.entries(machineEnv.pythonPackages).map(([pkg, installed]) => (
+                          <span
+                            key={pkg}
+                            className={
+                              installed
+                                ? 'text-emerald-600 dark:text-emerald-400 font-semibold'
+                                : 'text-slate-500 dark:text-slate-400'
+                            }
+                          >
+                            {pkg}: {installed ? t.libInstalled : t.libMissing}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Optional Collapsible External Local Server Connector (Ollama / LM Studio / llama.cpp) */}
+              <div className="pt-2 border-t border-slate-200 dark:border-slate-800">
+                <button
+                  type="button"
+                  onClick={() => setShowLocalApiPanel((prev) => !prev)}
+                  className="text-xs font-semibold text-indigo-600 dark:text-indigo-400 hover:underline inline-flex items-center gap-1.5"
+                >
+                  <Server size={14} />
+                  <span>{t.optionalApiServerToggle}</span>
+                  <ChevronDown
+                    size={14}
+                    className={`transition-transform ${showLocalApiPanel ? 'rotate-180' : ''}`}
+                  />
+                </button>
+
+                {showLocalApiPanel && (
+                  <div className="mt-4 space-y-4">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <input
+                        type="url"
+                        value={customProbeUrl}
+                        onChange={(e) => setCustomProbeUrl(e.target.value)}
+                        placeholder={t.customProbePlaceholder}
+                        dir="ltr"
+                        className="h-10 flex-1 min-w-[220px] px-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#0B0D11] text-xs font-mono text-slate-800 dark:text-slate-200"
+                      />
+                      <button
+                        type="button"
+                        onClick={handleScanLocalLlms}
+                        disabled={isScanningLocal}
+                        className="h-10 px-4 rounded-xl bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 hover:bg-slate-800 dark:hover:bg-white text-xs font-semibold flex items-center gap-2 transition-colors disabled:opacity-40 whitespace-nowrap shrink-0"
+                      >
+                        <RefreshCw size={14} className={isScanningLocal ? 'animate-spin' : ''} />
+                        <span>{isScanningLocal ? t.scanningLocal : t.scanLocalBtn}</span>
+                      </button>
+                    </div>
+
+                    {localServers.length > 0 && (
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        {localServers.map((srv) => (
+                          <div
+                            key={srv.id}
+                            className="p-3.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#0B0D11] space-y-2"
+                          >
+                            <div className="flex items-center justify-between gap-2" dir="ltr">
+                              <span className="text-xs font-bold text-slate-900 dark:text-slate-100">
+                                {srv.label}
+                              </span>
+                              <span
+                                className={`text-[11px] font-semibold ${
+                                  srv.online
+                                    ? 'text-emerald-600 dark:text-emerald-400'
+                                    : 'text-slate-400 dark:text-slate-500'
+                                }`}
+                              >
+                                {srv.online ? t.serverOnline : `${t.serverOffline} (${srv.error || '—'})`}
+                              </span>
+                            </div>
+                            <p className="text-[11px] font-mono text-slate-500 dark:text-slate-400" dir="ltr">
+                              {srv.baseUrl}
+                            </p>
+                            {srv.online && (
+                              <div className="flex flex-wrap gap-1.5 pt-1" dir="ltr">
+                                {srv.models.length > 0 ? (
+                                  srv.models.map((mName) => (
+                                    <button
+                                      key={mName}
+                                      type="button"
+                                      onClick={() => {
+                                        setQuickProvider(srv.providerType);
+                                        setQuickEndpoint(srv.baseUrl);
+                                        setQuickModel(mName);
+                                      }}
+                                      className="px-2.5 py-1 rounded-lg border border-indigo-200 dark:border-indigo-800 bg-indigo-50 dark:bg-indigo-950/40 text-indigo-700 dark:text-indigo-300 text-[11px] font-mono hover:bg-indigo-100 dark:hover:bg-indigo-900/60 transition-colors"
+                                    >
+                                      {mName}
+                                    </button>
+                                  ))
+                                ) : (
+                                  <span className="text-[11px] text-slate-400">{t.noLocalModels}</span>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5" dir="ltr">
+                      <select
+                        value={quickProvider}
+                        onChange={(e) => {
+                          const val = e.target.value as 'ollama' | 'openai_compatible';
+                          setQuickProvider(val);
+                          if (val === 'ollama' && quickEndpoint.includes('1234')) {
+                            setQuickEndpoint('http://127.0.0.1:11434');
+                          } else if (val === 'openai_compatible' && quickEndpoint.includes('11434')) {
+                            setQuickEndpoint('http://127.0.0.1:1234/v1');
+                          }
+                        }}
+                        className="h-10 px-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#0B0D11] text-xs font-semibold text-slate-800 dark:text-slate-200"
+                      >
+                        <option value="ollama">{t.providerOptions.ollama}</option>
+                        <option value="openai_compatible">{t.providerOptions.openai_compatible}</option>
+                      </select>
+
+                      <input
+                        type="url"
+                        value={quickEndpoint}
+                        onChange={(e) => setQuickEndpoint(e.target.value)}
+                        placeholder={t.endpointPlaceholder}
+                        className="h-10 px-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#0B0D11] text-xs font-mono text-slate-800 dark:text-slate-200"
+                      />
+
+                      <input
+                        type="text"
+                        value={quickModel}
+                        onChange={(e) => setQuickModel(e.target.value)}
+                        placeholder={t.modelNamePlaceholder}
+                        className="h-10 px-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#0B0D11] text-xs font-mono text-slate-800 dark:text-slate-200"
+                      />
+
+                      <input
+                        type="password"
+                        value={quickApiKey}
+                        onChange={(e) => setQuickApiKey(e.target.value)}
+                        placeholder={t.apiKeyPlaceholder}
+                        className="h-10 px-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#0B0D11] text-xs font-mono text-slate-800 dark:text-slate-200"
+                      />
+                    </div>
+
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <label className="inline-flex items-center gap-2 text-xs font-medium text-slate-600 dark:text-slate-300 cursor-pointer select-none">
+                        <input
+                          type="checkbox"
+                          checked={quickStrictLocal}
+                          onChange={(e) => setQuickStrictLocal(e.target.checked)}
+                          className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+                        />
+                        <span>{t.strictLocalLabel}</span>
+                      </label>
+
+                      <button
+                        type="button"
+                        onClick={handleApplyLocalLlmPreset}
+                        disabled={isApplyingQuickLocal || !quickEndpoint.trim()}
+                        className="h-10 px-4 rounded-xl bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 hover:bg-slate-800 dark:hover:bg-white text-xs font-semibold flex items-center gap-2 transition-colors disabled:opacity-40 whitespace-nowrap shrink-0"
+                      >
+                        <Zap size={14} />
+                        <span>{t.applyLocalAllBtn}</span>
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </section>
+
+            {/* 1.5 GPU / VRAM Lifecycle, Park/Restore & Tuning Manager */}
+            {vramStatus && (
+              <section className="bg-white dark:bg-[#13161C] border border-slate-200 dark:border-slate-800 rounded-2xl p-6 shadow-sm space-y-4">
+                <div className="flex flex-wrap items-start justify-between gap-4">
+                  <div className="max-w-2xl">
+                    <h2 className="text-base font-bold text-slate-900 dark:text-white flex items-center gap-2">
+                      <Zap size={18} className="text-amber-500 shrink-0" />
+                      <span>{t.vramTitle}</span>
+                    </h2>
+                    <p className="text-xs text-slate-500 dark:text-slate-400 mt-1.5 leading-relaxed">
+                      {t.vramSubtitle}
+                    </p>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => handleRefreshGpuVram('manual_refresh')}
+                      disabled={isRefreshingGpu || isUnloadingGpu}
+                      className="h-10 px-4 rounded-xl border border-indigo-200 dark:border-indigo-800 bg-indigo-50 dark:bg-indigo-950/40 text-indigo-700 dark:text-indigo-300 hover:bg-indigo-100 dark:hover:bg-indigo-900/60 text-xs font-semibold flex items-center gap-2 transition-colors disabled:opacity-40 whitespace-nowrap"
+                    >
+                      <RefreshCw size={14} className={isRefreshingGpu ? 'animate-spin' : ''} />
+                      <span>{isRefreshingGpu ? t.refreshingGpu : t.refreshGpuNowBtn}</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => handleUnloadAllGpu('manual')}
+                      disabled={isUnloadingGpu || isRefreshingGpu}
+                      className="h-10 px-4 rounded-xl bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 hover:bg-slate-800 dark:hover:bg-white text-xs font-semibold flex items-center gap-2 transition-colors disabled:opacity-40 whitespace-nowrap"
+                    >
+                      <Trash2 size={14} />
+                      <span>{isUnloadingGpu ? t.unloadingGpu : t.unloadAllNowBtn}</span>
+                    </button>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 pt-3 border-t border-slate-200 dark:border-slate-800 text-xs">
+                  <div>
+                    <span className="text-slate-500 dark:text-slate-400 block mb-0.5">{t.activeInVramLabel}</span>
+                    <span
+                      className={`font-mono font-semibold ${
+                        vramStatus.activeLoadedModel ||
+                        vramStatus.pythonWorkerRunning ||
+                        vramStatus.ollamaLoadedModels.length > 0
+                          ? 'text-indigo-600 dark:text-indigo-400'
+                          : 'text-emerald-600 dark:text-emerald-400'
+                      }`}
+                      dir="ltr"
+                    >
+                      {vramStatus.activeLoadedModel
+                        ? `${vramStatus.activeLoadedModel.adapter}:${vramStatus.activeLoadedModel.modelLabel}${
+                            vramStatus.idleSecondsRemaining !== null
+                              ? ` (${vramStatus.idleSecondsRemaining}s)`
+                              : ''
+                          }`
+                        : vramStatus.ollamaLoadedModels.length > 0
+                        ? vramStatus.ollamaLoadedModels.map((m) => m.name).join(', ')
+                        : vramStatus.pythonWorkerRunning
+                        ? 'local_disk:worker'
+                        : t.noModelInVram}
                     </span>
-                    <span className="text-[10px] text-slate-500">
-                      {new Date(item.timestamp).toLocaleTimeString(language === 'ar' ? 'ar-EG' : 'en-US')}
+                    {vramStatus.suspendedModel && (
+                      <span className="block text-[11px] font-mono text-amber-600 dark:text-amber-400 mt-0.5" dir="ltr">
+                        {t.parkedModelLabel} {vramStatus.suspendedModel.modelLabel}
+                      </span>
+                    )}
+                  </div>
+
+                  <div>
+                    <span className="text-slate-500 dark:text-slate-400 block mb-0.5">{t.gpuHardwareLabel}</span>
+                    <span className="font-mono font-semibold text-slate-900 dark:text-slate-100 tabular-nums" dir="ltr">
+                      {vramStatus.gpuInfo.available
+                        ? `${vramStatus.gpuInfo.name || 'GPU'} · ${vramStatus.gpuInfo.vramFreeMb ?? '?'} / ${
+                            vramStatus.gpuInfo.vramTotalMb ?? '?'
+                          } MB`
+                        : t.noNvidiaGpuLabel}
                     </span>
                   </div>
-                  <p className={`text-xs font-bold truncate ${darkMode ? 'text-slate-300' : 'text-slate-600'}`}>
-                    {item.input}
-                  </p>
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
 
-        {/* History Section */}
-        {history.length > 0 && (
-          <div className="mt-8 border-t pt-6">
-            <div className="flex items-center justify-between mb-4">
-              <h3 className={`text-lg font-bold ${darkMode ? 'text-slate-300' : 'text-slate-700'} flex items-center gap-2`}>
-                <HistoryIcon size={20} /> {language === 'ar' ? 'السجل الأخير' : 'Recent History'}
-              </h3>
-              <button 
-                onClick={() => setHistory([])}
-                className="text-xs text-red-400 hover:text-red-500 font-bold"
-              >
-                {language === 'ar' ? 'مسح السجل' : 'Clear History'}
-              </button>
-            </div>
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-              {history.map((item) => (
-                <button
-                  key={item.id}
-                  onClick={() => {
-                    setInputText(item.input);
-                    setOutputResult(item.output);
-                    setOutputType(item.type);
-                    window.scrollTo({ top: 0, behavior: 'smooth' });
-                  }}
-                  className={`text-right p-3 rounded-xl border transition-all ${
-                    darkMode ? 'bg-[#1a1a24] border-slate-800 hover:border-indigo-500/50' : 'bg-white border-slate-200 hover:border-indigo-400'
-                  } group`}
-                >
-                  <div className="flex items-center justify-between mb-1">
-                    <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
-                      darkMode ? 'bg-indigo-900/40 text-indigo-300' : 'bg-indigo-50 text-indigo-600'
-                    }`}>
-                      {item.type}
-                    </span>
-                    <span className="text-[10px] text-slate-500">
-                      {new Date(item.timestamp).toLocaleTimeString(language === 'ar' ? 'ar-EG' : 'en-US')}
+                  <div>
+                    <span className="text-slate-500 dark:text-slate-400 block mb-0.5">{t.lastFlushLabel}</span>
+                    <span className="font-mono text-slate-700 dark:text-slate-300" dir="ltr">
+                      {vramStatus.lastUnloadReport
+                        ? `${vramStatus.lastUnloadReport.reason} (${vramStatus.lastUnloadReport.unloaded.length})`
+                        : '—'}
                     </span>
                   </div>
-                  <p className={`text-xs font-bold truncate ${darkMode ? 'text-slate-300' : 'text-slate-600'}`}>
-                    {item.input}
-                  </p>
-                </button>
-              ))}
-            </div>
+                </div>
+
+                <div className="pt-3 border-t border-slate-200 dark:border-slate-800 space-y-3">
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
+                    <label className="inline-flex items-center gap-2 text-xs font-medium text-slate-700 dark:text-slate-300 cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        checked={vramStatus.policy.singleModelOnly}
+                        onChange={(e) => handleUpdateVramPolicy({ singleModelOnly: e.target.checked })}
+                        disabled={isUpdatingVramPolicy}
+                        className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+                      />
+                      <span>{t.singleModelOnlyLabel}</span>
+                    </label>
+
+                    <label className="inline-flex items-center gap-2 text-xs font-medium text-slate-700 dark:text-slate-300 cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        checked={vramStatus.policy.restorePreviousModel}
+                        onChange={(e) => handleUpdateVramPolicy({ restorePreviousModel: e.target.checked })}
+                        disabled={isUpdatingVramPolicy || !vramStatus.policy.singleModelOnly}
+                        className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 disabled:opacity-40"
+                      />
+                      <span>{t.restorePreviousLabel}</span>
+                    </label>
+
+                    <label className="inline-flex items-center gap-2 text-xs font-medium text-slate-700 dark:text-slate-300 cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        checked={vramStatus.policy.refreshAfterMultiModel}
+                        onChange={(e) => handleUpdateVramPolicy({ refreshAfterMultiModel: e.target.checked })}
+                        disabled={isUpdatingVramPolicy}
+                        className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+                      />
+                      <span>{t.refreshAfterMultiLabel}</span>
+                    </label>
+
+                    <label className="inline-flex items-center gap-2 text-xs font-medium text-slate-700 dark:text-slate-300 cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        checked={vramStatus.policy.unloadOnExit}
+                        onChange={(e) => handleUpdateVramPolicy({ unloadOnExit: e.target.checked })}
+                        disabled={isUpdatingVramPolicy}
+                        className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+                      />
+                      <span>{t.unloadOnExitLabel}</span>
+                    </label>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-4 pt-2 border-t border-slate-200/70 dark:border-slate-800/70">
+                    <div className="inline-flex items-center gap-2">
+                      <label
+                        htmlFor="vram-idle-select"
+                        className="text-xs font-semibold text-slate-600 dark:text-slate-400 whitespace-nowrap"
+                      >
+                        {t.idleUnloadLabel}
+                      </label>
+                      <select
+                        id="vram-idle-select"
+                        value={String(vramStatus.policy.idleUnloadSeconds)}
+                        onChange={(e) =>
+                          handleUpdateVramPolicy({ idleUnloadSeconds: Number(e.target.value) })
+                        }
+                        disabled={isUpdatingVramPolicy}
+                        className="h-9 px-3 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#0B0D11] text-xs font-semibold text-slate-800 dark:text-slate-200 cursor-pointer"
+                      >
+                        <option value="0">{t.unloadImmediateOption}</option>
+                        <option value="30">30 {t.unloadSecondsOption}</option>
+                        <option value="60">60 {t.unloadSecondsOption}</option>
+                        <option value="120">120 {t.unloadSecondsOption}</option>
+                        <option value="300">300 {t.unloadSecondsOption}</option>
+                      </select>
+                    </div>
+
+                    <div className="inline-flex items-center gap-2">
+                      <label
+                        htmlFor="vram-limit-select"
+                        className="text-xs font-semibold text-slate-600 dark:text-slate-400 whitespace-nowrap"
+                      >
+                        {t.gpuLimitLabel}
+                      </label>
+                      <select
+                        id="vram-limit-select"
+                        value={String(vramStatus.policy.gpuMemoryLimitPercent)}
+                        onChange={(e) =>
+                          handleUpdateVramPolicy({ gpuMemoryLimitPercent: Number(e.target.value) })
+                        }
+                        disabled={isUpdatingVramPolicy}
+                        className="h-9 px-3 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#0B0D11] text-xs font-mono font-semibold text-slate-800 dark:text-slate-200 cursor-pointer"
+                      >
+                        <option value="65">65%</option>
+                        <option value="75">75%</option>
+                        <option value="80">80%</option>
+                        <option value="85">85%</option>
+                        <option value="90">90%</option>
+                        <option value="95">95%</option>
+                      </select>
+                    </div>
+
+                    <div className="inline-flex items-center gap-2">
+                      <label
+                        htmlFor="vram-headroom-select"
+                        className="text-xs font-semibold text-slate-600 dark:text-slate-400 whitespace-nowrap"
+                      >
+                        {t.minFreeVramLabel}
+                      </label>
+                      <select
+                        id="vram-headroom-select"
+                        value={String(vramStatus.policy.minFreeVramMb)}
+                        onChange={(e) =>
+                          handleUpdateVramPolicy({ minFreeVramMb: Number(e.target.value) })
+                        }
+                        disabled={isUpdatingVramPolicy}
+                        className="h-9 px-3 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#0B0D11] text-xs font-mono font-semibold text-slate-800 dark:text-slate-200 cursor-pointer"
+                      >
+                        <option value="512">512 MB</option>
+                        <option value="1024">1024 MB</option>
+                        <option value="2048">2048 MB</option>
+                        <option value="4096">4096 MB</option>
+                      </select>
+                    </div>
+                  </div>
+                </div>
+              </section>
+            )}
+
+            {/* 2. 8-Slot Architecture & Per-Service Model Picker */}
+            <section className="bg-white dark:bg-[#13161C] border border-slate-200 dark:border-slate-800 rounded-2xl p-6 shadow-sm space-y-5">
+              <div className="flex flex-wrap items-center justify-between gap-4">
+                <div>
+                  <h2 className="text-lg font-bold text-slate-900 dark:text-white flex items-center gap-2">
+                    <Cpu size={20} className="text-indigo-600 dark:text-indigo-400" />
+                    <span>{t.modelsTitle}</span>
+                  </h2>
+                  <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">{t.modelsSubtitle}</p>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                {modelSlots.map((slot) => {
+                  const slotTest = testResults[slot.id];
+                  const diskModels = slot.availableLocalModels || [];
+                  return (
+                    <div
+                      key={slot.id}
+                      className="p-4 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#0B0D11] space-y-3"
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100">
+                            {language === 'ar' ? slot.nameAr : slot.nameEn}
+                          </h3>
+                          {(slot.roleAr || slot.roleEn) && (
+                            <p className="text-xs text-slate-600 dark:text-slate-400 mt-1 leading-relaxed">
+                              {language === 'ar' ? slot.roleAr : slot.roleEn}
+                            </p>
+                          )}
+                        </div>
+                        <span
+                          className={`text-[11px] font-mono font-semibold shrink-0 whitespace-nowrap ${
+                            slot.activeAdapter === 'fallback_ai'
+                              ? 'text-slate-500 dark:text-slate-400'
+                              : 'text-emerald-600 dark:text-emerald-400'
+                          }`}
+                          dir="ltr"
+                        >
+                          {slot.activeAdapter}
+                        </span>
+                      </div>
+
+                      <div className="text-xs font-mono text-slate-500 dark:text-slate-400 space-y-1" dir="ltr">
+                        <div>
+                          Folder: <span className="text-slate-800 dark:text-slate-200">{slot.folder}/</span>
+                          {slot.apiEndpoint && (
+                            <>
+                              {' · '}API:{' '}
+                              <span className="text-indigo-600 dark:text-indigo-400">{slot.apiEndpoint}</span>
+                            </>
+                          )}
+                        </div>
+                        {slot.helperScript && (
+                          <div>
+                            Script: <span className="text-indigo-600 dark:text-indigo-400">{slot.helperScript}</span>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Prominent Per-Service Local Disk Model Picker */}
+                      <div className="pt-2 border-t border-slate-200 dark:border-slate-800 space-y-2">
+                        <label
+                          htmlFor={`slot-disk-select-${slot.id}`}
+                          className="block text-xs font-semibold text-slate-700 dark:text-slate-300"
+                        >
+                          {t.selectModelForService}
+                        </label>
+                        <div className="relative">
+                          <select
+                            id={`slot-disk-select-${slot.id}`}
+                            value={selectedPathDrafts[slot.id] ?? slot.selectedModelPath ?? ''}
+                            onChange={(e) => handleSelectSlotModel(slot.id, e.target.value)}
+                            disabled={savingSlotId === slot.id}
+                            className="w-full h-10 ps-3 pe-8 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-[#13161C] text-xs font-semibold text-slate-900 dark:text-slate-100 appearance-none cursor-pointer"
+                          >
+                            <option value="">{t.defaultBuiltInFallback}</option>
+                            {diskModels.map((m) => (
+                              <option key={m.path} value={m.path}>
+                                {m.name} · {m.kind.toUpperCase()} · {m.sizeLabel} ({m.source === 'slot_folder' ? slot.folder : m.relativePath})
+                              </option>
+                            ))}
+                          </select>
+                          <ChevronDown
+                            size={14}
+                            className="pointer-events-none absolute top-1/2 -translate-y-1/2 end-2.5 text-slate-400"
+                          />
+                        </div>
+
+                        {diskModels.length === 0 && (
+                          <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                            {t.noDiskModelsFound}
+                          </p>
+                        )}
+
+                        <input
+                          type="text"
+                          value={selectedPathDrafts[slot.id] ?? ''}
+                          onChange={(e) =>
+                            setSelectedPathDrafts((prev) => ({ ...prev, [slot.id]: e.target.value }))
+                          }
+                          placeholder={t.selectedModelPathPlaceholder}
+                          dir="ltr"
+                          className="w-full h-9 px-3 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-[#13161C] text-xs font-mono text-slate-800 dark:text-slate-200 focus:border-indigo-500"
+                        />
+
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2" dir="ltr">
+                          <select
+                            value={providerDrafts[slot.id] ?? slot.providerType ?? 'auto'}
+                            onChange={(e) =>
+                              setProviderDrafts((prev) => ({
+                                ...prev,
+                                [slot.id]: e.target.value as ProviderType,
+                              }))
+                            }
+                            aria-label={t.providerLabel}
+                            className="h-9 px-2.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-[#13161C] text-xs font-medium text-slate-800 dark:text-slate-200"
+                          >
+                            <option value="auto">{t.providerOptions.auto}</option>
+                            <option value="local_disk">{t.providerOptions.local_disk}</option>
+                            <option value="python_cli">{t.providerOptions.python_cli}</option>
+                            {slot.supportsLocalLlm && (
+                              <>
+                                <option value="ollama">{t.providerOptions.ollama}</option>
+                                <option value="openai_compatible">{t.providerOptions.openai_compatible}</option>
+                              </>
+                            )}
+                            {!slot.supportsLocalLlm && (
+                              <option value="openai_audio">{t.providerOptions.openai_audio}</option>
+                            )}
+                            <option value="http_custom">{t.providerOptions.http_custom}</option>
+                            <option value="fallback_ai">{t.providerOptions.fallback_ai}</option>
+                          </select>
+
+                          <input
+                            type="text"
+                            value={modelNameDrafts[slot.id] ?? ''}
+                            onChange={(e) =>
+                              setModelNameDrafts((prev) => ({ ...prev, [slot.id]: e.target.value }))
+                            }
+                            placeholder={t.modelNamePlaceholder}
+                            className="h-9 px-3 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-[#13161C] text-xs font-mono text-slate-800 dark:text-slate-200 focus:border-indigo-500"
+                          />
+                        </div>
+
+                        <div className="flex gap-2" dir="ltr">
+                          <input
+                            type="url"
+                            value={endpointDrafts[slot.id] ?? ''}
+                            onChange={(e) =>
+                              setEndpointDrafts((prev) => ({ ...prev, [slot.id]: e.target.value }))
+                            }
+                            placeholder={t.endpointPlaceholder}
+                            className="flex-1 h-9 px-3 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-[#13161C] text-xs font-mono text-slate-800 dark:text-slate-200 focus:border-indigo-500"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => handleSaveModelConfig(slot.id)}
+                            disabled={savingSlotId === slot.id}
+                            className="h-9 px-3 rounded-lg bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 hover:bg-slate-800 dark:hover:bg-white text-xs font-semibold transition-colors disabled:opacity-40 whitespace-nowrap shrink-0"
+                          >
+                            {t.saveEndpoint}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleTestModelSlot(slot.id)}
+                            disabled={testingSlotId === slot.id}
+                            className="h-9 px-3 rounded-lg border border-indigo-200 dark:border-indigo-800 bg-indigo-50 dark:bg-indigo-950/40 text-indigo-700 dark:text-indigo-300 hover:bg-indigo-100 dark:hover:bg-indigo-900/50 text-xs font-semibold transition-colors disabled:opacity-40 whitespace-nowrap shrink-0"
+                          >
+                            {testingSlotId === slot.id ? t.testingConnection : t.testConnectionBtn}
+                          </button>
+                        </div>
+
+                        <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+                          <label className="inline-flex items-center gap-1.5 text-[11px] font-medium text-slate-600 dark:text-slate-400 cursor-pointer select-none">
+                            <input
+                              type="checkbox"
+                              checked={Boolean(slot.strictLocal)}
+                              onChange={(e) => handleToggleStrictLocal(slot.id, e.target.checked)}
+                              disabled={savingSlotId === slot.id}
+                              className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+                            />
+                            <span>{t.strictLocalLabel}</span>
+                          </label>
+
+                          {slot.supportsInternet && (
+                            <button
+                              type="button"
+                              onClick={() => handleToggleModelInternet(slot.id, !slot.internetAccess)}
+                              disabled={savingSlotId === slot.id}
+                              className={`h-7 px-2.5 rounded-lg border text-[11px] font-semibold inline-flex items-center gap-1.5 transition-colors whitespace-nowrap ${
+                                slot.internetAccess
+                                  ? 'border-emerald-200 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300'
+                                  : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-400'
+                              }`}
+                            >
+                              <Globe size={12} />
+                              <span>{slot.internetAccess ? t.internetOn : t.internetOff}</span>
+                            </button>
+                          )}
+                        </div>
+
+                        {slotTest && (
+                          <div
+                            className={`p-2.5 rounded-lg text-xs font-mono border ${
+                              slotTest.ok
+                                ? 'border-emerald-200 dark:border-emerald-800 bg-emerald-50/70 dark:bg-emerald-950/30 text-emerald-700 dark:text-emerald-300'
+                                : 'border-red-200 dark:border-red-900/60 bg-red-50/70 dark:bg-red-950/30 text-red-700 dark:text-red-300'
+                            }`}
+                            dir="ltr"
+                          >
+                            {slotTest.ok
+                              ? `OK · ${slotTest.engine} (${slotTest.latencyMs}ms) → ${slotTest.sampleOutput}`
+                              : `FAIL (${slotTest.latencyMs}ms) → ${slotTest.error}`}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </section>
           </div>
         )}
+      </main>
 
-      </div>
-
+      {/* ===================================================================== */}
+      {/* MODALS: Suno Prompt Generator & Voice Synthesis Lab                   */}
+      {/* ===================================================================== */}
       <AnimatePresence>
         {showSunoModal && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm rtl:text-right font-arabic">
-            <motion.div 
-              initial={{ opacity: 0, scale: 0.95, y: 20 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.95, y: 20 }}
-              className={`w-full max-w-lg overflow-hidden rounded-3xl shadow-2xl ${darkMode ? 'bg-[#121217] border border-slate-800' : 'bg-white'}`}
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.96 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.96 }}
+              className="w-full max-w-lg rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#13161C] shadow-xl overflow-hidden"
             >
-              <div className={`flex items-center justify-between p-5 border-b ${darkMode ? 'border-slate-800' : 'border-slate-100'}`}>
-                <h3 className={`font-bold flex items-center gap-2 ${darkMode ? 'text-white' : 'text-slate-900'}`}>
-                  <Headphones size={20} className="text-amber-500" />
-                  {t.sunoModalTitle}
+              <div className="flex items-center justify-between px-5 py-4 border-b border-slate-200 dark:border-slate-800">
+                <h3 className="text-sm font-bold text-slate-900 dark:text-white flex items-center gap-2">
+                  <Headphones size={18} className="text-indigo-600 dark:text-indigo-400" />
+                  <span>{t.sunoModalTitle}</span>
                 </h3>
-                <button onClick={() => setShowSunoModal(false)} className={`p-2 rounded-xl transition-colors ${darkMode ? 'hover:bg-slate-800 text-slate-400 hover:text-white' : 'hover:bg-slate-100 text-slate-500 hover:text-slate-900'}`}>
-                  <X size={20} />
+                <button
+                  onClick={() => setShowSunoModal(false)}
+                  className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 dark:hover:text-white"
+                >
+                  <X size={18} />
                 </button>
               </div>
-              <div className="p-6 space-y-6">
+              <div className="p-5 space-y-4">
+                <div className="flex items-center justify-between gap-2 pb-2 border-b border-slate-200 dark:border-slate-800">
+                  {renderInlineSlotSelector('prompt_generator')}
+                </div>
                 <div>
-                  <label className={`block text-sm font-bold mb-2 ${darkMode ? 'text-slate-300' : 'text-slate-700'}`}>
+                  <label className="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">
                     {t.sunoGenreAction}
                   </label>
-                  <select 
+                  <select
                     value={sunoGenre}
                     onChange={(e) => setSunoGenre(e.target.value)}
-                    className={`w-full p-4 rounded-xl border ${darkMode ? 'bg-[#09090b] border-slate-700 text-white focus:ring-amber-500/50' : 'bg-slate-50 border-slate-200 focus:ring-amber-400'} focus:ring-2 focus:outline-none transition-all`}
+                    className="w-full h-11 px-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#0B0D11] text-sm text-slate-900 dark:text-white"
                   >
-                    <option value="" disabled>{t.sunoGenreAction}</option>
                     {Object.entries(t.genres).map(([id, label]) => (
-                      <option key={id} value={id}>{label}</option>
+                      <option key={id} value={id}>
+                        {label}
+                      </option>
                     ))}
                   </select>
                 </div>
                 <div>
-                  <label className={`block text-sm font-bold mb-2 ${darkMode ? 'text-slate-300' : 'text-slate-700'}`}>
+                  <label className="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">
                     {t.sunoMoodPlaceholder}
                   </label>
-                  <textarea 
+                  <textarea
                     value={sunoMood}
                     onChange={(e) => setSunoMood(e.target.value)}
                     placeholder={t.sunoMoodPlaceholder}
-                    rows={4}
-                    className={`w-full p-4 rounded-xl border resize-none ${darkMode ? 'bg-[#09090b] border-slate-700 text-white focus:ring-amber-500/50' : 'bg-slate-50 border-slate-200 focus:ring-amber-400'} focus:ring-2 focus:outline-none transition-all`}
+                    rows={3}
+                    className="w-full p-3.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#0B0D11] text-sm text-slate-900 dark:text-white resize-none"
                   />
                 </div>
-                <button 
+                <label className="inline-flex items-center gap-2 text-xs font-medium text-slate-600 dark:text-slate-300 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={sunoWebSearch}
+                    onChange={(e) => setSunoWebSearch(e.target.checked)}
+                    className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+                  />
+                  <Globe size={14} className="text-indigo-500 shrink-0" />
+                  <span>{t.sunoWebSearchLabel}</span>
+                </label>
+                <button
                   onClick={handleGenerateMusicPrompt}
                   disabled={!sunoMood.trim() || !sunoGenre.trim()}
-                  className="w-full py-4 bg-amber-600 hover:bg-amber-500 text-white rounded-xl font-bold flex items-center justify-center gap-2 transition-all disabled:opacity-50"
+                  className="w-full h-11 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-semibold flex items-center justify-center gap-2 transition-colors disabled:opacity-40"
                 >
-                  <Sparkles size={20} /> {t.sunoPromptBtn}
+                  <Sparkles size={16} />
+                  <span>{t.sunoPromptBtn}</span>
                 </button>
               </div>
             </motion.div>
@@ -1879,84 +3549,83 @@ ${PHONETIC_RULES}
 
       <AnimatePresence>
         {showVoiceCloneModal && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm rtl:text-right font-arabic">
-            <motion.div 
-              initial={{ opacity: 0, scale: 0.95, y: 20 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.95, y: 20 }}
-              className={`w-full max-w-lg overflow-hidden rounded-3xl shadow-2xl ${darkMode ? 'bg-[#121217] border border-slate-800' : 'bg-white'}`}
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.96 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.96 }}
+              className="w-full max-w-lg rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#13161C] shadow-xl overflow-hidden"
             >
-              <div className={`flex items-center justify-between p-5 border-b ${darkMode ? 'border-slate-800' : 'border-slate-100'}`}>
-                <h3 className={`font-bold flex items-center gap-2 ${darkMode ? 'text-white' : 'text-slate-900'}`}>
-                  <Mic size={20} className="text-rose-500" />
-                  {t.voiceCloneModalTitle}
+              <div className="flex items-center justify-between px-5 py-4 border-b border-slate-200 dark:border-slate-800">
+                <h3 className="text-sm font-bold text-slate-900 dark:text-white flex items-center gap-2">
+                  <Mic size={18} className="text-indigo-600 dark:text-indigo-400" />
+                  <span>{t.voiceCloneModalTitle}</span>
                 </h3>
-                <button onClick={() => setShowVoiceCloneModal(false)} className={`p-2 rounded-xl transition-colors ${darkMode ? 'hover:bg-slate-800 text-slate-400 hover:text-white' : 'hover:bg-slate-100 text-slate-500 hover:text-slate-900'}`}>
-                  <X size={20} />
+                <button
+                  onClick={() => setShowVoiceCloneModal(false)}
+                  className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 dark:hover:text-white"
+                >
+                  <X size={18} />
                 </button>
               </div>
-              <div className="p-6 space-y-6 max-h-[70vh] overflow-y-auto">
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <div>
-                    <label className={`block text-xs font-bold mb-2 ${darkMode ? 'text-slate-400' : 'text-slate-600'}`}>
+              <div className="p-5 space-y-4">
+                <div className="flex items-center justify-between gap-2 pb-2 border-b border-slate-200 dark:border-slate-800">
+                  {renderInlineSlotSelector('voice_clone')}
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <label className="flex flex-col items-center justify-center p-4 border-2 border-dashed rounded-xl cursor-pointer border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#0B0D11] hover:border-indigo-500 transition-colors text-center">
+                    <Mic size={22} className="mb-2 text-indigo-500" />
+                    <span className="text-xs font-semibold text-slate-700 dark:text-slate-300">
                       {t.uploadSourceVoice}
-                    </label>
-                    <label className={`flex flex-col items-center justify-center w-full h-32 border-2 border-dashed rounded-2xl cursor-pointer transition-all ${voiceFile ? 'border-emerald-500 bg-emerald-500/5' : (darkMode ? 'border-slate-700 hover:border-indigo-500 bg-slate-900/50' : 'border-slate-200 hover:border-indigo-400 bg-slate-50')}`}>
-                      <div className="flex flex-col items-center justify-center p-4 text-center">
-                        <Mic className={`w-8 h-8 mb-2 ${voiceFile ? 'text-emerald-500' : 'text-slate-400'}`} />
-                        <p className={`text-[10px] leading-tight ${voiceFile ? 'text-emerald-600 font-bold' : 'text-slate-500'}`}>
-                          {voiceFile ? voiceFile.name : t.uploadAudio}
-                        </p>
-                      </div>
-                      <input 
-                        type="file" 
-                        className="hidden" 
-                        accept="audio/*" 
-                        onChange={(e) => setVoiceFile(e.target.files?.[0] || null)} 
-                      />
-                    </label>
-                  </div>
+                    </span>
+                    <span className="text-[11px] text-slate-500 mt-1 truncate max-w-full">
+                      {voiceFile ? voiceFile.name : t.uploadAudio}
+                    </span>
+                    <input
+                      type="file"
+                      className="hidden"
+                      accept="audio/*"
+                      onChange={(e) => setVoiceFile(e.target.files?.[0] || null)}
+                    />
+                  </label>
 
-                  <div>
-                    <label className={`block text-xs font-bold mb-2 ${darkMode ? 'text-slate-400' : 'text-slate-600'}`}>
+                  <label className="flex flex-col items-center justify-center p-4 border-2 border-dashed rounded-xl cursor-pointer border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#0B0D11] hover:border-indigo-500 transition-colors text-center">
+                    <Music size={22} className="mb-2 text-indigo-500" />
+                    <span className="text-xs font-semibold text-slate-700 dark:text-slate-300">
                       {t.uploadTargetPerformance}
-                    </label>
-                    <label className={`flex flex-col items-center justify-center w-full h-32 border-2 border-dashed rounded-2xl cursor-pointer transition-all ${targetAudioFile ? 'border-amber-500 bg-amber-500/5' : (darkMode ? 'border-slate-700 hover:border-amber-500 bg-slate-900/50' : 'border-slate-200 hover:border-amber-400 bg-slate-50')}`}>
-                      <div className="flex flex-col items-center justify-center p-4 text-center">
-                        <Music className={`w-8 h-8 mb-2 ${targetAudioFile ? 'text-amber-500' : 'text-slate-400'}`} />
-                        <p className={`text-[10px] leading-tight ${targetAudioFile ? 'text-amber-600 font-bold' : 'text-slate-500'}`}>
-                          {targetAudioFile ? targetAudioFile.name : t.uploadAudio}
-                        </p>
-                      </div>
-                      <input 
-                        type="file" 
-                        className="hidden" 
-                        accept="audio/*" 
-                        onChange={(e) => setTargetAudioFile(e.target.files?.[0] || null)} 
-                      />
-                    </label>
-                  </div>
+                    </span>
+                    <span className="text-[11px] text-slate-500 mt-1 truncate max-w-full">
+                      {targetAudioFile ? targetAudioFile.name : t.uploadAudio}
+                    </span>
+                    <input
+                      type="file"
+                      className="hidden"
+                      accept="audio/*"
+                      onChange={(e) => setTargetAudioFile(e.target.files?.[0] || null)}
+                    />
+                  </label>
                 </div>
 
                 <div>
-                  <label className={`block text-sm font-bold mb-2 ${darkMode ? 'text-slate-300' : 'text-slate-700'}`}>
+                  <label className="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">
                     {t.enterTargetLyrics}
                   </label>
-                  <textarea 
+                  <textarea
                     value={cloneTargetText}
                     onChange={(e) => setCloneTargetText(e.target.value)}
                     placeholder={t.enterTargetLyrics}
                     rows={2}
-                    className={`w-full p-4 rounded-xl border resize-none ${darkMode ? 'bg-[#09090b] border-slate-700 text-white focus:ring-rose-500/50' : 'bg-slate-50 border-slate-200 focus:ring-rose-400'} focus:ring-2 focus:outline-none transition-all text-sm`}
+                    className="w-full p-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#0B0D11] text-sm text-slate-900 dark:text-white resize-none"
                   />
                 </div>
-                <button 
+
+                <button
                   onClick={handleVoiceClone}
                   disabled={!voiceFile || !targetAudioFile}
-                  className="w-full py-4 bg-rose-600 hover:bg-rose-500 text-white rounded-xl font-bold flex items-center justify-center gap-2 transition-all disabled:opacity-50 shadow-lg shadow-rose-500/20"
+                  className="w-full h-11 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-semibold flex items-center justify-center gap-2 transition-colors disabled:opacity-40"
                 >
-                  <RefreshCw size={20} className={isLoading ? 'animate-spin' : ''} />
-                  {t.cloneAction}
+                  <RefreshCw size={16} className={isLoading ? 'animate-spin' : ''} />
+                  <span>{t.cloneAction}</span>
                 </button>
               </div>
             </motion.div>
@@ -1964,37 +3633,10 @@ ${PHONETIC_RULES}
         )}
       </AnimatePresence>
 
-      <footer className={`text-center pt-8 pb-4 mt-auto border-t-0 shadow-none bg-transparent ${darkMode ? 'text-slate-500' : 'text-slate-400'} text-sm font-bold font-arabic`}>
+      {/* Quiet Footer */}
+      <footer className="py-6 text-center text-xs text-slate-500 dark:text-slate-500 border-t border-slate-200/70 dark:border-slate-800/70">
         {language === 'ar' ? 'تم التطوير بواسطة عبدالرحمن عمرو' : 'Developed by Abdelrahman Amr'}
       </footer>
-
-      <style dangerouslySetInnerHTML={{ __html: `
-        @import url('https://fonts.googleapis.com/css2?family=Aref+Ruqaa:wght@400;700&family=Pacifico&family=Noto+Sans+Arabic:wght@400;700;900&display=swap');
-        
-        .font-arabic { font-family: 'Noto Sans Arabic', sans-serif; }
-        .font-ruqaa { font-family: 'Aref Ruqaa', serif; }
-        .font-pacifico { font-family: 'Pacifico', cursive; }
-        
-        .neon-ar {
-          color: #fff;
-          text-shadow: 
-            0 0 7px #fff,
-            0 0 10px #fff,
-            0 0 21px var(--accent-primary),
-            0 0 42px var(--accent-primary);
-        }
-        
-        .neon-en {
-          color: #fff;
-          text-shadow: 
-            0 0 5px #fff, 
-            0 0 10px #fff, 
-            0 0 20px var(--accent-primary);
-        }
-
-        ::selection { background: var(--accent-primary); color: white; }
-        textarea:focus, input:focus { outline: none; }
-      `}} />
     </div>
   );
 };

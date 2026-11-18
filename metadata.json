@@ -3,5 +3,8 @@
   "description": "An Egyptian Arabic AI studio for generating songs, adding diacritics, spell checking, and word pronunciation search.",
   "requestFramePermissions": [
     "microphone"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
   ]
 }

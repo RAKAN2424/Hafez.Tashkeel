@@ -1,0 +1,28 @@
+# ==============================================================================
+# Hafiz Bel'Amya - Direct Local Disk Models Engine Requirements
+# Install these once on your machine to run local .gguf, HuggingFace, Whisper,
+# Piper, and Coqui/XTTS models directly from disk with ZERO external APIs.
+# ==============================================================================
+
+# 1. Local .gguf LLMs (Qwen, Llama, Gemma, Mistral, Aya, etc.)
+llama-cpp-python>=0.2.90
+
+# 2. HuggingFace Local Models (LLMs, Arabic Diacritizers, Whisper HF, MMS-TTS)
+torch>=2.1.0
+transformers>=4.44.0
+accelerate>=0.33.0
+safetensors>=0.4.3
+sentencepiece>=0.2.0
+
+# 3. Direct Local Speech-to-Text (ASR)
+faster-whisper>=1.0.3
+# Optional for standard OpenAI Whisper .pt checkpoints:
+# openai-whisper
+
+# 4. Direct Local Text-to-Speech (TTS) & Voice Cloning
+piper-tts>=1.2.0
+onnxruntime>=1.18.0
+soundfile>=0.12.1
+numpy>=1.26.0
+# Optional for Coqui XTTS-v2 local voice cloning:
+# TTS>=0.22.0
