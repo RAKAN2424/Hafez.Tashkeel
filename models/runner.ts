@@ -118,6 +118,8 @@ export interface MachineEnvironment {
   pythonVersion: string | null;
   pipAvailable: boolean;
   ffmpegAvailable: boolean;
+  nvidiaGpuAvailable: boolean;
+  nvidiaGpuName: string | null;
   pythonPackages: Record<string, boolean>;
   localModelsRoot: string;
   searchRoots: string[];
@@ -392,7 +394,321 @@ export function setSearchRoots(roots: string[]): {
   };
 }
 
-function collectAllRootModels(roots: string[]): LocalDiskModel[] {
+export interface PartitionScanSummary {
+  scannedAt: number;
+  scannedPartitions: string[];
+  discoveredRoots: string[];
+  discoveredCount: number;
+}
+
+const KNOWN_AI_ROOT_SUBDIRS = [
+  'models',
+  'Models',
+  path.join('models', 'local'),
+  'AI',
+  path.join('AI', 'Models'),
+  path.join('AI', 'LMStudio-Models'),
+  path.join('AI', 'LMStudio-Models', 'local'),
+  'LMStudio',
+  'LMStudio-Models',
+  path.join('LMStudio-Models', 'local'),
+  'LM-Studio',
+  path.join('LM-Studio', 'models'),
+  'LocalModels',
+  'LLM',
+  'LLMs',
+  'HuggingFace',
+  'OmniVoice',
+  path.join('OmniVoice', 'models'),
+  path.join('ComfyUI', 'models'),
+];
+
+const KNOWN_MODEL_KEYWORDS = [
+  'namaa-space',
+  'cohere-speech-tashkeel',
+  'cohere-transcribe',
+  'faster-whisper',
+  'mobiuslabsgmbh',
+  'qwencleo',
+  'qwen3-asr',
+  'moss-transcribe',
+  'omnivoice',
+  'voicetut',
+  'nile-chat',
+  'qwen3.5',
+  'qwen3-8b',
+  'qwen3-4b',
+  'qwen3.8',
+  'qwen2.5',
+  'gemma-4',
+  'gpt-oss',
+  'llama-3.2',
+  'yue2',
+  'xtts',
+  'piper',
+  'seed-vc',
+  'lmstudio-models',
+  'huggingface',
+  'localmodels',
+];
+
+const PARTITION_SKIP_DIRS = new Set([
+  'windows',
+  '$recycle.bin',
+  '$windows.~bt',
+  'system volume information',
+  'program files',
+  'program files (x86)',
+  'programdata',
+  'recovery',
+  'perflogs',
+  'msocache',
+  'appdata',
+  'node_modules',
+  '.git',
+  '__pycache__',
+  '.venv',
+  'venv',
+  'blobs',
+  'refs',
+  '.no_exist',
+  'xet',
+  'boot',
+  'intel',
+  'amd',
+  'nvidia',
+  'tmp',
+  'temp',
+]);
+
+let lastPartitionScan: PartitionScanSummary | null = null;
+let cachedPartitionModels: { timestamp: number; roots: string[]; models: LocalDiskModel[]; partitions: string[] } | null = null;
+
+export function getLastPartitionScanSummary(): PartitionScanSummary | null {
+  return lastPartitionScan;
+}
+
+export function getMountedPartitions(): string[] {
+  const partitions: string[] = [];
+  const seen = new Set<string>();
+  const addPart = (p: string) => {
+    const clean = (p || '').trim();
+    if (!clean) return;
+    const key = process.platform === 'win32' ? clean.toLowerCase() : clean;
+    if (!seen.has(key)) {
+      seen.add(key);
+      partitions.push(clean);
+    }
+  };
+
+  if (process.env.HAFIZ_EXTRA_SCAN_ROOTS) {
+    for (const seg of process.env.HAFIZ_EXTRA_SCAN_ROOTS.split(path.delimiter)) {
+      const clean = sanitizePathInput(seg);
+      if (clean && fs.existsSync(clean)) addPart(clean);
+    }
+  }
+
+  if (process.platform === 'win32') {
+    const appDrive = path.parse(process.cwd()).root;
+    if (appDrive && fs.existsSync(appDrive)) addPart(appDrive);
+    for (let code = 67; code <= 90; code++) {
+      // C:\ through Z:\
+      const drive = `${String.fromCharCode(code)}:\\`;
+      try {
+        if (fs.existsSync(drive)) addPart(drive);
+      } catch {
+        // ignore unready drives
+      }
+    }
+  } else {
+    const home = os.homedir();
+    if (home && fs.existsSync(home)) addPart(home);
+    addPart(process.cwd());
+  }
+
+  return partitions;
+}
+
+export function discoverPartitionModelRoots(options?: {
+  force?: boolean;
+  timeBudgetMs?: number;
+}): {
+  scannedPartitions: string[];
+  discoveredRoots: string[];
+  discoveredModels: LocalDiskModel[];
+} {
+  if (
+    !options?.force &&
+    cachedPartitionModels &&
+    Date.now() - cachedPartitionModels.timestamp < 2 * 60 * 1000
+  ) {
+    return {
+      scannedPartitions: cachedPartitionModels.partitions,
+      discoveredRoots: cachedPartitionModels.roots,
+      discoveredModels: cachedPartitionModels.models,
+    };
+  }
+
+  const startMs = Date.now();
+  const timeBudgetMs = options?.timeBudgetMs ?? 4500;
+  const partitions = getMountedPartitions();
+  const candidateRoots: string[] = [];
+  const seenRoots = new Set<string>();
+
+  const addCandidateRoot = (dirPath: string) => {
+    const clean = sanitizePathInput(dirPath);
+    if (!clean) return;
+    const key = process.platform === 'win32' ? clean.toLowerCase() : clean;
+    if (seenRoots.has(key)) return;
+    try {
+      if (fs.existsSync(clean) && fs.statSync(clean).isDirectory()) {
+        seenRoots.add(key);
+        candidateRoots.push(clean);
+      }
+    } catch {
+      // ignore permission errors
+    }
+  };
+
+  // 1. User home AI stores (.lmstudio, .cache/huggingface, .ollama, Documents)
+  const home = os.homedir();
+  if (home) {
+    addCandidateRoot(path.join(home, '.lmstudio', 'models'));
+    addCandidateRoot(path.join(home, '.cache', 'huggingface', 'hub'));
+    addCandidateRoot(path.join(home, '.ollama', 'models'));
+    addCandidateRoot(path.join(home, 'Documents', 'LM Studio', 'models'));
+    addCandidateRoot(path.join(home, 'Models'));
+    addCandidateRoot(path.join(home, 'AI'));
+  }
+
+  // 2. App's own models folder + known AI locations across EVERY mounted partition (C:\, D:\, E:\, ...)
+  addCandidateRoot(path.join(process.cwd(), 'models', 'local'));
+  for (const part of partitions) {
+    for (const sub of KNOWN_AI_ROOT_SUBDIRS) {
+      addCandidateRoot(path.join(part, sub));
+    }
+  }
+
+  // 3. Targeted fast partition walk (depth <= 3) to catch models dropped anywhere on C:, D:, E:, F:...
+  const modelDirMatches: LocalDiskModel[] = [];
+  const seenModelPaths = new Set<string>();
+  const pushModel = (m: LocalDiskModel) => {
+    const key = process.platform === 'win32' ? m.path.toLowerCase() : m.path;
+    if (!seenModelPaths.has(key)) {
+      seenModelPaths.add(key);
+      modelDirMatches.push(m);
+    }
+  };
+
+  const quickPartitionCrawl = (dir: string, depth: number) => {
+    if (Date.now() - startMs > timeBudgetMs) return;
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+
+    for (const entry of entries) {
+      if (Date.now() - startMs > timeBudgetMs) return;
+      if (!entry.isDirectory()) continue;
+      const lower = entry.name.toLowerCase();
+      if (lower.startsWith('.') || lower.startsWith('$') || PARTITION_SKIP_DIRS.has(lower)) continue;
+
+      const full = path.join(dir, entry.name);
+      const isKnownKeyword = KNOWN_MODEL_KEYWORDS.some((kw) => lower.includes(kw));
+
+      if (isKnownKeyword) {
+        addCandidateRoot(full);
+        const dirKind = classifyModelDirKind(full);
+        if (dirKind) {
+          const sizeBytes = getDirTotalSize(full);
+          pushModel({
+            id: full,
+            name: entry.name,
+            path: full,
+            relativePath: full,
+            kind: dirKind,
+            sizeBytes,
+            sizeLabel: formatBytes(sizeBytes),
+            source: 'models_root',
+          });
+        } else {
+          for (const found of scanDirectoryForModels(full, 'models_root', 4)) {
+            pushModel(found);
+          }
+        }
+        continue;
+      }
+
+      if (depth < 3) {
+        quickPartitionCrawl(full, depth + 1);
+      }
+    }
+  };
+
+  for (const part of partitions) {
+    if (Date.now() - startMs > timeBudgetMs) break;
+    quickPartitionCrawl(part, 0);
+  }
+
+  // 4. Deep-scan all confirmed AI candidate roots
+  for (const rootDir of candidateRoots) {
+    const selfKind = classifyModelDirKind(rootDir);
+    if (selfKind) {
+      const sizeBytes = getDirTotalSize(rootDir);
+      pushModel({
+        id: rootDir,
+        name: path.basename(rootDir),
+        path: rootDir,
+        relativePath: rootDir,
+        kind: selfKind,
+        sizeBytes,
+        sizeLabel: formatBytes(sizeBytes),
+        source: 'models_root',
+      });
+    }
+    for (const m of scanDirectoryForModels(rootDir, 'models_root', 5)) {
+      pushModel(m);
+    }
+  }
+
+  // Filter discoveredRoots down to those that actually contain at least one discovered model (plus existing searchRoots)
+  const populatedRoots = new Set<string>();
+  for (const rootDir of candidateRoots) {
+    const rootLower = process.platform === 'win32' ? rootDir.toLowerCase() : rootDir;
+    if (
+      modelDirMatches.some((m) => {
+        const mp = process.platform === 'win32' ? m.path.toLowerCase() : m.path;
+        return mp === rootLower || mp.startsWith(rootLower + path.sep);
+      })
+    ) {
+      populatedRoots.add(rootDir);
+    }
+  }
+
+  const rootsList = Array.from(populatedRoots);
+  cachedPartitionModels = {
+    timestamp: Date.now(),
+    roots: rootsList,
+    models: modelDirMatches,
+    partitions,
+  };
+  lastPartitionScan = {
+    scannedAt: cachedPartitionModels.timestamp,
+    scannedPartitions: partitions,
+    discoveredRoots: rootsList,
+    discoveredCount: modelDirMatches.length,
+  };
+
+  return {
+    scannedPartitions: partitions,
+    discoveredRoots: rootsList,
+    discoveredModels: modelDirMatches,
+  };
+}
+
+function collectAllRootModels(roots: string[], includePartitions = false): LocalDiskModel[] {
   const seen = new Set<string>();
   const all: LocalDiskModel[] = [];
   for (const r of roots) {
@@ -400,13 +716,41 @@ function collectAllRootModels(roots: string[]): LocalDiskModel[] {
     if (!clean) continue;
     const resolved = path.isAbsolute(clean) ? clean : path.resolve(process.cwd(), clean);
     if (!fs.existsSync(resolved)) continue;
-    for (const m of scanDirectoryForModels(resolved, 'models_root', 4)) {
+    const selfKind = classifyModelDirKind(resolved);
+    if (selfKind) {
+      const sizeBytes = getDirTotalSize(resolved);
+      if (!seen.has(resolved)) {
+        seen.add(resolved);
+        all.push({
+          id: resolved,
+          name: path.basename(resolved),
+          path: resolved,
+          relativePath: resolved,
+          kind: selfKind,
+          sizeBytes,
+          sizeLabel: formatBytes(sizeBytes),
+          source: 'models_root',
+        });
+      }
+    }
+    for (const m of scanDirectoryForModels(resolved, 'models_root', 5)) {
       if (!seen.has(m.path)) {
         seen.add(m.path);
         all.push(m);
       }
     }
   }
+
+  if (includePartitions || all.length === 0) {
+    const partScan = discoverPartitionModelRoots();
+    for (const m of partScan.discoveredModels) {
+      if (!seen.has(m.path)) {
+        seen.add(m.path);
+        all.push(m);
+      }
+    }
+  }
+
   return all;
 }
 
@@ -611,7 +955,7 @@ const SLOT_SUBFOLDER_NAMES = new Set([
   'scripts',
 ]);
 
-const SKIP_SCAN_DIRS = new Set(['.git', '__pycache__', 'node_modules', 'blobs', 'refs', '.no_exist']);
+const SKIP_SCAN_DIRS = new Set(['.git', '__pycache__', 'node_modules', 'blobs', 'refs', '.no_exist', 'xet']);
 
 export function scanDirectoryForModels(
   baseDir: string,
@@ -751,7 +1095,7 @@ function resolveDirectModelSlotStatus(
   const sharedModels =
     cachedSharedModels !== undefined
       ? cachedSharedModels
-      : scanDirectoryForModels(path.join(process.cwd(), 'models'), 'models_shared', 2, true);
+      : scanDirectoryForModels(path.join(process.cwd(), 'models'), 'models_shared', 5, true);
 
   const seenPaths = new Set<string>();
   const availableLocalModels: LocalDiskModel[] = [];
@@ -909,8 +1253,29 @@ export function resolveModelSlotStatus(
 export function getAllModelsStatus(): ModelSlotStatus[] {
   const parsed = readRegistryFile();
   const roots = getSearchRoots();
-  const rootModels = collectAllRootModels(roots);
-  const sharedModels = scanDirectoryForModels(path.join(process.cwd(), 'models'), 'models_shared', 2, true);
+  const rootModels = collectAllRootModels(roots, true);
+  const sharedModels = scanDirectoryForModels(path.join(process.cwd(), 'models'), 'models_shared', 5, true);
+
+  // If any primary slot is still unbound and models were dropped into ./models/ or any partition, auto-bind them silently
+  const primarySlots: ModelSlotId[] = [
+    'asr_diacritics',
+    'tts_reader',
+    'smart_studio',
+    'rhyme_rewrite',
+    'web_lyrics_agent',
+    'voice_clone',
+  ];
+  const hasUnboundPrimary = primarySlots.some((id) => {
+    const e = parsed.models[id];
+    if (!e || e.providerType === 'fallback_ai' || (e.endpointUrl || '').trim()) return false;
+    const cleaned = sanitizePathInput(e.selectedModelPath || '');
+    return !cleaned || !fs.existsSync(resolveDiskPath(cleaned));
+  });
+  if (hasUnboundPrimary && (sharedModels.length > 0 || rootModels.length > 0)) {
+    const res = autoAssignModels({ overwriteExisting: false, fixMismatches: true, scanAllPartitions: true });
+    return res.models;
+  }
+
   return Object.values(parsed.models).map((entry) =>
     resolveModelSlotStatus(entry, roots[0] || '', rootModels, sharedModels, parsed.models)
   );
@@ -919,22 +1284,48 @@ export function getAllModelsStatus(): ModelSlotStatus[] {
 export function autoAssignModels(options?: {
   overwriteExisting?: boolean;
   fixMismatches?: boolean;
+  scanAllPartitions?: boolean;
 }): {
   assigned: Array<{ slotId: ModelSlotId; modelName: string; path: string; reason: string }>;
   models: ModelSlotStatus[];
   discoveredCount: number;
+  scannedPartitions: string[];
+  discoveredRoots: string[];
 } {
   const parsed = readRegistryFile();
   const manifest = getBackendsManifest();
   const recs: Record<string, { preferredPatterns?: string[]; excludePatterns?: string[] }> =
     manifest.slotRecommendations || {};
 
-  const roots = getSearchRoots();
-  const rootModels = collectAllRootModels(roots);
-  const sharedModels = scanDirectoryForModels(path.join(process.cwd(), 'models'), 'models_shared', 2, true);
+  let modified = false;
+  const doPartitionScan = options?.scanAllPartitions !== false;
+  const partScan = doPartitionScan ? discoverPartitionModelRoots({ force: true }) : null;
+
+  // Merge newly discovered active partition roots into registry searchRoots cleanly
+  const existingRoots = getSearchRoots();
+  const mergedRootsSet = new Set<string>(existingRoots);
+  if (partScan) {
+    for (const r of partScan.discoveredRoots) {
+      mergedRootsSet.add(r);
+    }
+    const mergedRoots = Array.from(mergedRootsSet);
+    if (JSON.stringify(mergedRoots) !== JSON.stringify(parsed.searchRoots || [])) {
+      parsed.searchRoots = mergedRoots;
+      modified = true;
+    }
+    const curLocalRoot = sanitizePathInput(parsed.localModelsRoot || '');
+    if ((!curLocalRoot || !fs.existsSync(resolveDiskPath(curLocalRoot))) && partScan.discoveredRoots.length > 0) {
+      parsed.localModelsRoot = partScan.discoveredRoots[0];
+      modified = true;
+    }
+  }
+
+  const roots = Array.from(mergedRootsSet);
+  const rootModels = collectAllRootModels(roots, doPartitionScan);
+  const sharedModels = scanDirectoryForModels(path.join(process.cwd(), 'models'), 'models_shared', 5, true);
   const allCatalog: LocalDiskModel[] = [];
   const seen = new Set<string>();
-  for (const m of [...sharedModels, ...rootModels]) {
+  for (const m of [...sharedModels, ...rootModels, ...(partScan?.discoveredModels || [])]) {
     if (!seen.has(m.path)) {
       seen.add(m.path);
       allCatalog.push(m);
@@ -951,11 +1342,12 @@ export function autoAssignModels(options?: {
     'voice_clone',
   ];
 
-  let modified = false;
+  const cwdPrefix = path.resolve(process.cwd()) + path.sep;
 
   for (const slotId of primarySlots) {
     const entry = parsed.models[slotId];
     if (!entry) continue;
+    if (entry.providerType === 'fallback_ai' && !options?.overwriteExisting) continue;
 
     // Sanitize quotes from existing selectedModelPath first
     const cleanedExisting = sanitizePathInput(entry.selectedModelPath || '');
@@ -977,7 +1369,7 @@ export function autoAssignModels(options?: {
     }
 
     const slotFolderAbs = path.join(process.cwd(), entry.folder);
-    const slotModels = scanDirectoryForModels(slotFolderAbs, 'slot_folder', 3).filter(
+    const slotModels = scanDirectoryForModels(slotFolderAbs, 'slot_folder', 4).filter(
       (m) => m.kind !== 'python_script'
     );
     const candidates = [...slotModels, ...allCatalog];
@@ -985,24 +1377,39 @@ export function autoAssignModels(options?: {
 
     let bestMatch: LocalDiskModel | undefined;
     for (const pat of preferred) {
-      bestMatch = candidates.find((c) => {
+      const matching = candidates.filter((c) => {
         const hay = `${c.name} ${c.path}`.toLowerCase();
         if (!hay.includes(pat)) return false;
+        if (hay.includes('mmproj') || hay.includes('imatrix') || hay.includes('tokenizer')) return false;
         if (excludes.some((ex) => hay.includes(ex))) return false;
         return true;
       });
-      if (bestMatch) break;
+      if (matching.length > 0) {
+        // Prefer local app ./models/ first, otherwise pick largest valid weight file/folder
+        matching.sort((a, b) => {
+          const aLocal = a.source !== 'models_root' ? 1 : 0;
+          const bLocal = b.source !== 'models_root' ? 1 : 0;
+          if (aLocal !== bLocal) return bLocal - aLocal;
+          return (b.sizeBytes || 0) - (a.sizeBytes || 0);
+        });
+        bestMatch = matching[0];
+        break;
+      }
     }
 
     if (bestMatch) {
-      entry.selectedModelPath = bestMatch.path;
+      const absMatch = path.resolve(bestMatch.path);
+      const storedPath = absMatch.startsWith(cwdPrefix)
+        ? path.relative(process.cwd(), absMatch).replace(/\\/g, '/')
+        : bestMatch.path;
+      entry.selectedModelPath = storedPath;
       entry.providerType = bestMatch.kind === 'python_script' ? 'python_cli' : 'local_disk';
       entry.strictLocal = true;
       modified = true;
       assigned.push({
         slotId,
         modelName: bestMatch.name,
-        path: bestMatch.path,
+        path: storedPath,
         reason: isMismatched ? 'mismatch_repaired' : 'auto_matched',
       });
     }
@@ -1028,10 +1435,16 @@ export function autoAssignModels(options?: {
     fs.writeFileSync(getRegistryPath(), JSON.stringify(parsed, null, 2) + '\n', 'utf-8');
   }
 
+  const finalModels = Object.values(parsed.models).map((entry) =>
+    resolveModelSlotStatus(entry, roots[0] || '', rootModels, sharedModels, parsed.models)
+  );
+
   return {
     assigned,
-    models: getAllModelsStatus(),
+    models: finalModels,
     discoveredCount: allCatalog.length,
+    scannedPartitions: partScan?.scannedPartitions || getMountedPartitions(),
+    discoveredRoots: partScan?.discoveredRoots || roots,
   };
 }
 
@@ -1041,6 +1454,8 @@ export function getMachineEnvironment(): MachineEnvironment {
   let pythonVersion: string | null = null;
   let pipAvailable = false;
   let ffmpegAvailable = false;
+  let nvidiaGpuAvailable = false;
+  let nvidiaGpuName: string | null = null;
   let pythonPackages: Record<string, boolean> = {
     llama_cpp: false,
     transformers: false,
@@ -1049,11 +1464,25 @@ export function getMachineEnvironment(): MachineEnvironment {
     torch: false,
     faster_whisper: false,
     TTS: false,
+    omnivoice: false,
     piper: false,
     onnxruntime: false,
     soundfile: false,
     librosa: false,
   };
+
+  try {
+    const gpuOut = execFileSync('nvidia-smi', ['--query-gpu=name', '--format=csv,noheader'], {
+      encoding: 'utf-8',
+      timeout: 1500,
+    }).trim();
+    if (gpuOut) {
+      nvidiaGpuAvailable = true;
+      nvidiaGpuName = gpuOut.split('\n')[0].trim() || null;
+    }
+  } catch {
+    nvidiaGpuAvailable = false;
+  }
 
   try {
     execFileSync('ffmpeg', ['-version'], { encoding: 'utf-8', timeout: 1500 });
@@ -1081,7 +1510,7 @@ export function getMachineEnvironment(): MachineEnvironment {
       pythonBin,
       [
         '-c',
-        "import importlib.util, json; mods=['llama_cpp','transformers','accelerate','safetensors','torch','faster_whisper','TTS','piper','onnxruntime','soundfile','librosa']; print(json.dumps({m: importlib.util.find_spec(m) is not None for m in mods}))",
+        "import importlib.util, json; mods=['llama_cpp','transformers','accelerate','safetensors','torch','faster_whisper','TTS','omnivoice','piper','onnxruntime','soundfile','librosa']; print(json.dumps({m: importlib.util.find_spec(m) is not None for m in mods}))",
       ],
       { encoding: 'utf-8', timeout: 4000 }
     ).trim();
@@ -1102,6 +1531,8 @@ export function getMachineEnvironment(): MachineEnvironment {
     pythonVersion,
     pipAvailable,
     ffmpegAvailable,
+    nvidiaGpuAvailable,
+    nvidiaGpuName,
     pythonPackages,
     localModelsRoot: getLocalModelsRoot(),
     searchRoots: getSearchRoots(),
@@ -1143,6 +1574,366 @@ export async function installPythonBackends(packages?: string[]): Promise<{
       }
     );
   });
+}
+
+export interface BackendUpdateItem {
+  id: string;
+  pipName: string;
+  category: string;
+  optional: boolean;
+  installedVersion: string | null;
+  latestVersion: string | null;
+  status: 'up_to_date' | 'update_available' | 'cuda_upgrade_needed' | 'not_installed' | 'offline_unknown';
+  cudaNote?: string | null;
+  downloadUrl?: string;
+}
+
+export interface BackendUpdateReport {
+  checkedAt: number;
+  onlineReachable: boolean;
+  cudaStatus: {
+    nvidiaGpuAvailable: boolean;
+    nvidiaGpuName: string | null;
+    nvidiaDriverCuda: string | null;
+    torchCudaVersion: string | null;
+    torchCudaActive: boolean;
+    llamaGpuOffloadSupported: boolean | null;
+    needsCudaUpgrade: boolean;
+  };
+  outdatedCount: number;
+  missingCoreCount: number;
+  cudaUpgradeCount: number;
+  items: BackendUpdateItem[];
+}
+
+let cachedUpdateReport: BackendUpdateReport | null = null;
+
+export function getCachedStartupUpdateReport(): BackendUpdateReport | null {
+  return cachedUpdateReport;
+}
+
+function normalizeSemverParts(v: string): number[] {
+  const core = v.split('+')[0].split(/[a-zA-Z-]/)[0];
+  return core
+    .split('.')
+    .map((p) => {
+      const n = parseInt(p, 10);
+      return Number.isFinite(n) ? n : 0;
+    });
+}
+
+function compareVersions(installed: string, latest: string): number {
+  const a = normalizeSemverParts(installed);
+  const b = normalizeSemverParts(latest);
+  const len = Math.max(a.length, b.length, 3);
+  for (let i = 0; i < len; i++) {
+    const av = a[i] || 0;
+    const bv = b[i] || 0;
+    if (av < bv) return -1;
+    if (av > bv) return 1;
+  }
+  return 0;
+}
+
+async function fetchPyPiLatestVersion(pipName: string): Promise<string | null> {
+  try {
+    const res = await fetch(`https://pypi.org/pypi/${encodeURIComponent(pipName)}/json`, {
+      method: 'GET',
+      signal: AbortSignal.timeout(4500),
+      headers: { Accept: 'application/json' },
+    });
+    if (!res.ok) return null;
+    const data: any = await res.json();
+    return typeof data?.info?.version === 'string' ? data.info.version : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function checkBackendUpdatesOnline(force = false): Promise<BackendUpdateReport> {
+  if (!force && cachedUpdateReport && Date.now() - cachedUpdateReport.checkedAt < 5 * 60 * 1000) {
+    return cachedUpdateReport;
+  }
+
+  const manifest = getBackendsManifest();
+  const manifestBackends: Array<any> = Array.isArray(manifest.backends) ? manifest.backends : [];
+
+  // Ensure ctranslate2 & torchaudio accelerators are also checked
+  const trackedSpecs = [...manifestBackends];
+  if (!trackedSpecs.some((b) => b.pipName === 'ctranslate2')) {
+    trackedSpecs.push({
+      id: 'ctranslate2',
+      pipName: 'ctranslate2',
+      category: 'asr_accelerator',
+      optional: false,
+      downloadUrl: 'https://pypi.org/project/ctranslate2/#files',
+    });
+  }
+
+  const pythonBin = resolvePythonExecutable();
+  let nvidiaGpuAvailable = false;
+  let nvidiaGpuName: string | null = null;
+  let nvidiaDriverCuda: string | null = null;
+
+  try {
+    const smi = execFileSync('nvidia-smi', { encoding: 'utf-8', timeout: 2000 });
+    nvidiaGpuAvailable = true;
+    const cudaMatch = smi.match(/CUDA Version:\s*([\d.]+)/i);
+    if (cudaMatch) nvidiaDriverCuda = cudaMatch[1];
+    const nameOut = execFileSync('nvidia-smi', ['--query-gpu=name', '--format=csv,noheader'], {
+      encoding: 'utf-8',
+      timeout: 1500,
+    }).trim();
+    if (nameOut) nvidiaGpuName = nameOut.split('\n')[0].trim() || null;
+  } catch {
+    nvidiaGpuAvailable = false;
+  }
+
+  let localVersions: Record<string, string | null> = {};
+  let torchCudaVersion: string | null = null;
+  let torchCudaActive = false;
+  let llamaGpuOffloadSupported: boolean | null = null;
+
+  try {
+    const namesJson = JSON.stringify(trackedSpecs.map((b) => b.pipName));
+    const pyScript = [
+      'import importlib.metadata as md, json',
+      `names = ${namesJson}`,
+      'vers = {}',
+      'for n in names:',
+      '  try:',
+      '    if n == "onnxruntime":',
+      '      try: vers[n] = md.version("onnxruntime-gpu")',
+      '      except Exception: vers[n] = md.version("onnxruntime")',
+      '    else:',
+      '      vers[n] = md.version(n)',
+      '  except Exception:',
+      '    vers[n] = None',
+      't_cuda, t_active, l_gpu = None, False, None',
+      'try:',
+      '  import torch',
+      '  t_cuda = getattr(torch.version, "cuda", None)',
+      '  t_active = bool(torch.cuda.is_available())',
+      'except Exception: pass',
+      'try:',
+      '  import llama_cpp',
+      '  fn = getattr(llama_cpp, "llama_supports_gpu_offload", None)',
+      '  if callable(fn): l_gpu = bool(fn())',
+      'except Exception: pass',
+      'print(json.dumps({"vers": vers, "torchCuda": t_cuda, "torchActive": t_active, "llamaGpu": l_gpu}))',
+    ].join('\n');
+
+    const raw = execFileSync(pythonBin, ['-c', pyScript], { encoding: 'utf-8', timeout: 6000 }).trim();
+    const parsed = JSON.parse(raw);
+    localVersions = parsed.vers || {};
+    torchCudaVersion = parsed.torchCuda || null;
+    torchCudaActive = Boolean(parsed.torchActive);
+    llamaGpuOffloadSupported = typeof parsed.llamaGpu === 'boolean' ? parsed.llamaGpu : null;
+  } catch {
+    // Python unavailable or probe failed cleanly
+  }
+
+  const latestEntries = await Promise.all(
+    trackedSpecs.map(async (spec) => ({
+      pipName: spec.pipName,
+      latest: await fetchPyPiLatestVersion(spec.pipName),
+    }))
+  );
+  const latestMap = new Map(latestEntries.map((e) => [e.pipName, e.latest]));
+  const onlineReachable = latestEntries.some((e) => e.latest !== null);
+
+  const items: BackendUpdateItem[] = [];
+  let outdatedCount = 0;
+  let missingCoreCount = 0;
+  let cudaUpgradeCount = 0;
+
+  for (const spec of trackedSpecs) {
+    const installedVersion = localVersions[spec.pipName] || null;
+    const latestVersion = latestMap.get(spec.pipName) || null;
+    const isOptional = Boolean(spec.optional);
+
+    let status: BackendUpdateItem['status'] = 'up_to_date';
+    let cudaNote: string | null = null;
+
+    if (!installedVersion) {
+      status = 'not_installed';
+      if (!isOptional) missingCoreCount += 1;
+    } else {
+      const torchNeedsCuda = spec.pipName === 'torch' && nvidiaGpuAvailable && !torchCudaVersion;
+      const llamaNeedsCuda =
+        spec.pipName === 'llama-cpp-python' && nvidiaGpuAvailable && llamaGpuOffloadSupported === false;
+
+      if (torchNeedsCuda || llamaNeedsCuda) {
+        status = 'cuda_upgrade_needed';
+        cudaNote =
+          spec.pipName === 'torch'
+            ? 'CPU-only PyTorch detected while NVIDIA GPU is available (switch to CUDA 12.4 wheel)'
+            : 'llama-cpp-python lacks GPU offload (switch to CUDA 12.4 wheel for faster inference)';
+        cudaUpgradeCount += 1;
+      } else if (latestVersion && compareVersions(installedVersion, latestVersion) < 0) {
+        status = 'update_available';
+        outdatedCount += 1;
+      } else if (!latestVersion) {
+        status = 'offline_unknown';
+      } else {
+        status = 'up_to_date';
+      }
+    }
+
+    items.push({
+      id: spec.id || spec.pipName,
+      pipName: spec.pipName,
+      category: spec.category || 'backend',
+      optional: isOptional,
+      installedVersion,
+      latestVersion,
+      status,
+      cudaNote,
+      downloadUrl: spec.downloadUrl || spec.pypiUrl,
+    });
+  }
+
+  const report: BackendUpdateReport = {
+    checkedAt: Date.now(),
+    onlineReachable,
+    cudaStatus: {
+      nvidiaGpuAvailable,
+      nvidiaGpuName,
+      nvidiaDriverCuda,
+      torchCudaVersion,
+      torchCudaActive,
+      llamaGpuOffloadSupported,
+      needsCudaUpgrade: cudaUpgradeCount > 0,
+    },
+    outdatedCount,
+    missingCoreCount,
+    cudaUpgradeCount,
+    items,
+  };
+  cachedUpdateReport = report;
+  return report;
+}
+
+function runPipExec(pythonBin: string, args: string[]): Promise<{ ok: boolean; command: string; log: string }> {
+  const command = `${pythonBin} ${args.join(' ')}`;
+  return new Promise((resolve) => {
+    execFile(
+      pythonBin,
+      args,
+      { cwd: process.cwd(), timeout: 360000, maxBuffer: 4 * 1024 * 1024 },
+      (err, stdout, stderr) => {
+        const log = [stdout, stderr, err ? err.message : ''].filter(Boolean).join('\n').trim().slice(-4000);
+        resolve({ ok: !err, command, log });
+      }
+    );
+  });
+}
+
+export async function autoUpdateBackendsOnline(options?: {
+  packages?: string[];
+  includeMissingCore?: boolean;
+}): Promise<{
+  ok: boolean;
+  updatedPackages: string[];
+  commands: string[];
+  log: string;
+  updateReport: BackendUpdateReport;
+  machine: MachineEnvironment;
+}> {
+  const report = await checkBackendUpdatesOnline(true);
+  const pythonBin = resolvePythonExecutable();
+  const hasNvidia = report.cudaStatus.nvidiaGpuAvailable;
+  const includeMissingCore = options?.includeMissingCore !== false;
+
+  const requested = Array.isArray(options?.packages) && options.packages.length > 0
+    ? new Set(options.packages.map((p) => p.toLowerCase()))
+    : null;
+
+  const targets = report.items.filter((item) => {
+    if (requested && !requested.has(item.pipName.toLowerCase()) && !requested.has(item.id.toLowerCase())) {
+      return false;
+    }
+    if (item.status === 'update_available' || item.status === 'cuda_upgrade_needed') return true;
+    if (includeMissingCore && !item.optional && item.status === 'not_installed') return true;
+    return false;
+  });
+
+  if (targets.length === 0) {
+    return {
+      ok: true,
+      updatedPackages: [],
+      commands: [],
+      log: 'All installed backends and CUDA wheels are already up to date.',
+      updateReport: report,
+      machine: getMachineEnvironment(),
+    };
+  }
+
+  const commands: string[] = [];
+  const logs: string[] = [];
+  let allOk = true;
+  const updatedPackages: string[] = [];
+
+  const cudaTorchTargets = hasNvidia ? targets.filter((t) => t.pipName === 'torch') : [];
+  const cudaLlamaTargets = hasNvidia ? targets.filter((t) => t.pipName === 'llama-cpp-python') : [];
+  const standardTargets = targets.filter(
+    (t) =>
+      !(hasNvidia && (t.pipName === 'torch' || t.pipName === 'llama-cpp-python'))
+  );
+
+  if (cudaTorchTargets.length > 0) {
+    const r = await runPipExec(pythonBin, [
+      '-m',
+      'pip',
+      'install',
+      '--upgrade',
+      'torch',
+      'torchaudio',
+      '--index-url',
+      'https://download.pytorch.org/whl/cu124',
+    ]);
+    commands.push(r.command);
+    if (r.log) logs.push(r.log);
+    if (r.ok) updatedPackages.push('torch (CUDA 12.4)');
+    else allOk = false;
+  }
+
+  if (cudaLlamaTargets.length > 0) {
+    const r = await runPipExec(pythonBin, [
+      '-m',
+      'pip',
+      'install',
+      '--upgrade',
+      'llama-cpp-python',
+      '--extra-index-url',
+      'https://abetlen.github.io/llama-cpp-python/whl/cu124',
+    ]);
+    commands.push(r.command);
+    if (r.log) logs.push(r.log);
+    if (r.ok) updatedPackages.push('llama-cpp-python (CUDA)');
+    else allOk = false;
+  }
+
+  if (standardTargets.length > 0) {
+    const pkgs = standardTargets.map((t) =>
+      t.pipName === 'onnxruntime' && hasNvidia ? 'onnxruntime-gpu' : t.pipName
+    );
+    const r = await runPipExec(pythonBin, ['-m', 'pip', 'install', '--upgrade', ...pkgs]);
+    commands.push(r.command);
+    if (r.log) logs.push(r.log);
+    if (r.ok) updatedPackages.push(...pkgs);
+    else allOk = false;
+  }
+
+  const freshReport = await checkBackendUpdatesOnline(true);
+  return {
+    ok: allOk,
+    updatedPackages,
+    commands,
+    log: logs.join('\n\n').slice(-4000) || (allOk ? 'Updated cleanly.' : 'Some updates failed.'),
+    updateReport: freshReport,
+    machine: getMachineEnvironment(),
+  };
 }
 
 export async function discoverLocalLlms(customUrl?: string): Promise<LocalLlmDiscovery[]> {

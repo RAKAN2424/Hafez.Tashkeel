@@ -10,11 +10,15 @@ import fs from 'fs';
 import {
   applyLocalLlmPreset,
   autoAssignModels,
+  autoUpdateBackendsOnline,
+  checkBackendUpdatesOnline,
   discoverLocalLlms,
   dispatchModelTask,
   extractJsonFromText,
   getAllModelsStatus,
   getBackendsManifest,
+  getCachedStartupUpdateReport,
+  getLastPartitionScanSummary,
   getLocalModelsRoot,
   getMachineEnvironment,
   getSearchRoots,
@@ -200,7 +204,14 @@ async function startServer() {
       const models = getAllModelsStatus();
       const machine = getMachineEnvironment();
       const vramStatus = await getVramStatus();
-      res.json({ models, machine, localModelsRoot: getLocalModelsRoot(), vramStatus });
+      res.json({
+        models,
+        machine,
+        localModelsRoot: getLocalModelsRoot(),
+        searchRoots: getSearchRoots(),
+        partitionScan: getLastPartitionScanSummary(),
+        vramStatus,
+      });
     } catch (error: any) {
       res.status(500).json({ error: error.message || 'Failed to read models registry' });
     }
@@ -305,19 +316,41 @@ async function startServer() {
     }
   });
 
-  // 1a-3. Auto-Search & Auto-Assign Best Local Models for Each Slot
+  // 1a-3. Auto-Search & Auto-Assign Best Local Models for Each Slot (Across All Partitions)
   app.post('/api/models/auto-assign', (req, res) => {
     try {
       const overwriteExisting = Boolean(req.body?.overwriteExisting);
       const fixMismatches = req.body?.fixMismatches !== false;
-      const result = autoAssignModels({ overwriteExisting, fixMismatches });
+      const scanAllPartitions = req.body?.scanAllPartitions !== false;
+      const result = autoAssignModels({ overwriteExisting, fixMismatches, scanAllPartitions });
       res.json({
         ...result,
         machine: getMachineEnvironment(),
         searchRoots: getSearchRoots(),
+        partitionScan: getLastPartitionScanSummary(),
       });
     } catch (error: any) {
       res.status(500).json({ error: error.message || 'Failed to auto-assign models' });
+    }
+  });
+
+  // 1a-4. Deep Cross-Partition Auto-Scan (C:, D:, E:, ...) & Automatic Model Binding
+  app.post('/api/models/scan-partitions', (req, res) => {
+    try {
+      const overwriteExisting = Boolean(req.body?.overwriteExisting);
+      const result = autoAssignModels({
+        overwriteExisting,
+        fixMismatches: true,
+        scanAllPartitions: true,
+      });
+      res.json({
+        ...result,
+        machine: getMachineEnvironment(),
+        searchRoots: getSearchRoots(),
+        partitionScan: getLastPartitionScanSummary(),
+      });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message || 'Failed to scan partitions for models' });
     }
   });
 
@@ -340,9 +373,36 @@ async function startServer() {
         models,
         searchRoots,
         missingCorePackages,
+        partitionScan: getLastPartitionScanSummary(),
+        updateReport: getCachedStartupUpdateReport(),
       });
     } catch (error: any) {
       res.status(500).json({ error: error.message || 'Failed to read setup status' });
+    }
+  });
+
+  // 1s-1b. Live Online Update Check Across Backends, Speed Accelerators & CUDA
+  app.get('/api/setup/check-updates', async (req, res) => {
+    try {
+      const force = req.query.force === '1' || req.query.force === 'true';
+      const updateReport = await checkBackendUpdatesOnline(force);
+      res.json({ updateReport });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message || 'Failed to check backend updates online' });
+    }
+  });
+
+  // 1s-1c. Auto-Update Outdated Backends, Speed Libraries & CUDA Wheels Online
+  app.post('/api/setup/auto-update', async (req, res) => {
+    try {
+      const packages = Array.isArray(req.body?.packages)
+        ? req.body.packages.map((p: any) => String(p).trim()).filter(Boolean)
+        : undefined;
+      const includeMissingCore = req.body?.includeMissingCore !== false;
+      const result = await autoUpdateBackendsOnline({ packages, includeMissingCore });
+      res.json(result);
+    } catch (error: any) {
+      res.status(500).json({ ok: false, error: error.message || 'Failed to auto-update backends' });
     }
   });
 
@@ -362,10 +422,9 @@ async function startServer() {
   // 1s-3. Download Requirements, Setup, Launcher & Manifest Files
   app.get('/api/setup/download/:filename', (req, res) => {
     const allowed: Record<string, string> = {
+      'setup.exe': path.join(process.cwd(), 'setup.exe'),
       'requirements.txt': path.join(process.cwd(), 'requirements.txt'),
       'setup.py': path.join(process.cwd(), 'setup.py'),
-      'install_backends.bat': path.join(process.cwd(), 'install_backends.bat'),
-      'install_backends.sh': path.join(process.cwd(), 'install_backends.sh'),
       'start_hafiz.bat': path.join(process.cwd(), 'start_hafiz.bat'),
       'start_hafiz.sh': path.join(process.cwd(), 'start_hafiz.sh'),
       'backends_manifest.json': path.join(process.cwd(), 'models', 'backends_manifest.json'),
@@ -1460,15 +1519,42 @@ ${taskInstruction}
   }
 
   try {
-    const startupScan = autoAssignModels({ overwriteExisting: false, fixMismatches: true });
+    const startupScan = autoAssignModels({
+      overwriteExisting: false,
+      fixMismatches: true,
+      scanAllPartitions: true,
+    });
+    console.log(
+      `[Hafiz Auto-Models] Scanned partitions (${startupScan.scannedPartitions.join(', ')}), discovered ${startupScan.discoveredCount} model(s) across ${startupScan.discoveredRoots.length} root(s), auto-bound ${startupScan.assigned.length} slot(s).`
+    );
     if (startupScan.assigned.length > 0) {
       console.log(
-        `[Hafiz Auto-Models] Bound ${startupScan.assigned.length} local model(s) from fixed directories.`
+        `[Hafiz Auto-Models] Bound slots: ${startupScan.assigned.map((a) => `${a.slotId}->${a.modelName}`).join(', ')}`
       );
     }
   } catch {
-    // Non-fatal if fixed model drives are unmounted
+    // Non-fatal if partitions/drives are inaccessible
   }
+
+  void checkBackendUpdatesOnline(true)
+    .then(async (report) => {
+      if (report.outdatedCount > 0 || report.cudaUpgradeCount > 0) {
+        console.log(
+          `[Hafiz Online Updater] Found ${report.outdatedCount} PyPI update(s) and ${report.cudaUpgradeCount} CUDA upgrade(s).`
+        );
+        if (process.env.AUTO_UPDATE_ON_START === '1') {
+          const upd = await autoUpdateBackendsOnline({ includeMissingCore: true });
+          console.log(
+            `[Hafiz Online Updater] Auto-updated: ${upd.updatedPackages.join(', ') || 'none'}`
+          );
+        }
+      } else if (report.onlineReachable) {
+        console.log('[Hafiz Online Updater] All backends & CUDA wheels are up to date.');
+      }
+    })
+    .catch(() => {
+      // Non-fatal when offline
+    });
 
   const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`Server running on http://localhost:${PORT}`);

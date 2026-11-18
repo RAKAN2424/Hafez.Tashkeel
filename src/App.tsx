@@ -125,6 +125,8 @@ interface MachineEnvironment {
   pythonVersion: string | null;
   pipAvailable?: boolean;
   ffmpegAvailable?: boolean;
+  nvidiaGpuAvailable?: boolean;
+  nvidiaGpuName?: string | null;
   pythonPackages?: Record<string, boolean>;
   localModelsRoot?: string;
   searchRoots?: string[];
@@ -183,9 +185,48 @@ interface VramStatusInfo {
   };
 }
 
+interface BackendUpdateItem {
+  id: string;
+  pipName: string;
+  category: string;
+  optional: boolean;
+  installedVersion: string | null;
+  latestVersion: string | null;
+  status: 'up_to_date' | 'update_available' | 'cuda_upgrade_needed' | 'not_installed' | 'offline_unknown';
+  cudaNote?: string | null;
+  downloadUrl?: string;
+}
+
+interface BackendUpdateReport {
+  checkedAt: number;
+  onlineReachable: boolean;
+  cudaStatus: {
+    nvidiaGpuAvailable: boolean;
+    nvidiaGpuName: string | null;
+    nvidiaDriverCuda: string | null;
+    torchCudaVersion: string | null;
+    torchCudaActive: boolean;
+    llamaGpuOffloadSupported: boolean | null;
+    needsCudaUpgrade: boolean;
+  };
+  outdatedCount: number;
+  missingCoreCount: number;
+  cudaUpgradeCount: number;
+  items: BackendUpdateItem[];
+}
+
+interface PartitionScanInfo {
+  scannedAt: number;
+  scannedPartitions: string[];
+  discoveredRoots: string[];
+  discoveredModelsCount: number;
+  durationMs: number;
+}
+
 const BRAND_IMAGE_URL = 'https://i.ibb.co/ZRDHCGHz/Untitled-1080-x-1080-px.jpg';
 
 const App = () => {
+  const userInteractedTabRef = useRef(false);
   const [activeTab, setActiveTab] = useState<ActiveTab>(() => {
     if (typeof window !== 'undefined') {
       const saved = sessionStorage.getItem('hafiz_active_tab');
@@ -198,6 +239,10 @@ const App = () => {
     }
     return 'studio';
   });
+  const navigateToTab = (tab: ActiveTab) => {
+    userInteractedTabRef.current = true;
+    setActiveTab(tab);
+  };
   const [toolSubTab, setToolSubTab] = useState<ToolSubTab>('rhymes');
 
   const [inputText, setInputText] = useState('');
@@ -292,9 +337,23 @@ const App = () => {
   const [searchRootsDraft, setSearchRootsDraft] = useState('');
   const [isSavingRoots, setIsSavingRoots] = useState(false);
   const [isAutoAssigning, setIsAutoAssigning] = useState(false);
+  const [isScanningPartitions, setIsScanningPartitions] = useState(false);
+  const [partitionScan, setPartitionScan] = useState<PartitionScanInfo | null>(null);
   const [autoAssignNotice, setAutoAssignNotice] = useState<string | null>(null);
   const [isInstallingPip, setIsInstallingPip] = useState(false);
+  const [installingPkgId, setInstallingPkgId] = useState<string | null>(null);
   const [pipInstallLog, setPipInstallLog] = useState<{ ok: boolean; command: string; log: string } | null>(null);
+  const [updateReport, setUpdateReport] = useState<BackendUpdateReport | null>(null);
+  const [isCheckingUpdates, setIsCheckingUpdates] = useState(false);
+  const [isAutoUpdating, setIsAutoUpdating] = useState(false);
+  const [autoUpdateOnLaunch, setAutoUpdateOnLaunch] = useState<boolean>(() => {
+    if (typeof window !== 'undefined') {
+      return localStorage.getItem('hafiz_auto_update_on_launch') !== '0';
+    }
+    return true;
+  });
+  const [autoUpdateNotice, setAutoUpdateNotice] = useState<string | null>(null);
+  const autoUpdateTriggeredRef = useRef(false);
 
   // UI & Theme state
   const [isLoading, setIsLoading] = useState(false);
@@ -403,13 +462,106 @@ const App = () => {
         if (Array.isArray(data.missingCorePackages)) setMissingCorePackages(data.missingCorePackages);
         if (Array.isArray(data.searchRoots)) setSearchRootsDraft(data.searchRoots.join('\n'));
         if (data.machine) setMachineEnv(data.machine);
+        if (data.partitionScan) setPartitionScan(data.partitionScan);
+        if (data.updateReport) setUpdateReport(data.updateReport);
         if (Array.isArray(data.models)) {
           setModelSlots(data.models);
           syncSlotDrafts(data.models);
         }
+        // If dependencies and primary local models from partitions are already auto-bound on initial launch,
+        // enter Studio automatically without overriding any explicit user tab navigation.
+        if (
+          typeof window !== 'undefined' &&
+          !userInteractedTabRef.current &&
+          !sessionStorage.getItem('hafiz_active_tab') &&
+          !localStorage.getItem('hafiz_setup_done') &&
+          Array.isArray(data.missingCorePackages) &&
+          data.missingCorePackages.length === 0 &&
+          Array.isArray(data.models) &&
+          data.models.some((m: any) => m.id === 'smart_studio' && m.activeAdapter !== 'fallback_ai')
+        ) {
+          localStorage.setItem('hafiz_setup_done', '1');
+          const boundNames = data.models
+            .filter((m: any) => !m.inheritedFrom && m.activeAdapter !== 'fallback_ai' && m.effectiveModelLabel)
+            .map((m: any) => `${language === 'ar' ? m.nameAr : m.nameEn}: ${m.effectiveModelLabel}`)
+            .slice(0, 4);
+          if (boundNames.length > 0) {
+            setAutoAssignNotice(`${t.autoAssignedReadyNotice} ${boundNames.join(' · ')}`);
+          }
+          setActiveTab('studio');
+        }
       }
     } catch {
       // ignore initial background setup fetch error
+    }
+  };
+
+  const handleAutoUpdateAll = async (includeMissingCore = true) => {
+    setIsAutoUpdating(true);
+    setError(null);
+    try {
+      const res = await fetch('/api/setup/auto-update', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ includeMissingCore }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Auto-update failed');
+      if (data.updateReport) setUpdateReport(data.updateReport);
+      if (data.machine) setMachineEnv(data.machine);
+      const updatedList: string[] = Array.isArray(data.updatedPackages) ? data.updatedPackages : [];
+      if (updatedList.length > 0) {
+        setAutoUpdateNotice(
+          language === 'ar'
+            ? `تم تحديث وترقية الباك إند/CUDA تلقائياً: ${updatedList.join(' · ')}`
+            : `Auto-updated backends & CUDA: ${updatedList.join(' · ')}`
+        );
+      }
+      if (Array.isArray(data.commands) && data.commands.length > 0) {
+        setPipInstallLog({
+          ok: Boolean(data.ok),
+          command: data.commands.join(' && '),
+          log: data.log || (data.ok ? 'OK' : 'Completed with warnings'),
+        });
+      }
+      await fetchSetupStatus();
+    } catch (err: any) {
+      setError(err.message || 'Auto-update failed');
+    } finally {
+      setIsAutoUpdating(false);
+    }
+  };
+
+  const checkBackendUpdates = async (force = false, triggerAutoIfEnabled = false) => {
+    setIsCheckingUpdates(true);
+    try {
+      const res = await fetch(`/api/setup/check-updates${force ? '?force=1' : ''}`);
+      const data = await res.json();
+      if (res.ok && data.updateReport) {
+        const rep: BackendUpdateReport = data.updateReport;
+        setUpdateReport(rep);
+        if (
+          triggerAutoIfEnabled &&
+          autoUpdateOnLaunch &&
+          !autoUpdateTriggeredRef.current &&
+          rep.onlineReachable &&
+          (rep.outdatedCount > 0 || rep.cudaUpgradeCount > 0)
+        ) {
+          autoUpdateTriggeredRef.current = true;
+          await handleAutoUpdateAll(false);
+        }
+      }
+    } catch {
+      // ignore if server offline
+    } finally {
+      setIsCheckingUpdates(false);
+    }
+  };
+
+  const handleToggleAutoUpdateOnLaunch = (nextVal: boolean) => {
+    setAutoUpdateOnLaunch(nextVal);
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('hafiz_auto_update_on_launch', nextVal ? '1' : '0');
     }
   };
 
@@ -430,6 +582,9 @@ const App = () => {
         if (Array.isArray(data.machine.searchRoots)) {
           setSearchRootsDraft(data.machine.searchRoots.join('\n'));
         }
+      }
+      if (res.ok && data.partitionScan) {
+        setPartitionScan(data.partitionScan);
       }
       if (res.ok && data.vramStatus) {
         setVramStatus(data.vramStatus);
@@ -489,7 +644,7 @@ const App = () => {
       const res = await fetch('/api/models/auto-assign', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ overwriteExisting, fixMismatches: true }),
+        body: JSON.stringify({ overwriteExisting, fixMismatches: true, scanAllPartitions: true }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Auto-assign failed');
@@ -498,22 +653,72 @@ const App = () => {
         syncSlotDrafts(data.models);
       }
       if (data.machine) setMachineEnv(data.machine);
+      if (data.partitionScan) setPartitionScan(data.partitionScan);
+      if (Array.isArray(data.searchRoots)) setSearchRootsDraft(data.searchRoots.join('\n'));
       const assignedList = Array.isArray(data.assigned) ? data.assigned : [];
+      const scannedDrives = Array.isArray(data.scannedPartitions) ? data.scannedPartitions.join(', ') : '';
       if (assignedList.length > 0) {
         setAutoAssignNotice(
-          `${t.setupAssignedMsg} ${assignedList.map((a: any) => `${a.slotId} → ${a.modelName}`).join(' · ')}`
+          `${t.setupAssignedMsg} ${assignedList.map((a: any) => `${a.slotId} → ${a.modelName}`).join(' · ')}${
+            scannedDrives ? ` (${scannedDrives})` : ''
+          }`
         );
       } else {
         setAutoAssignNotice(
           language === 'ar'
-            ? `تم فحص المسارات المحددة (عدد المكتشف: ${data.discoveredCount ?? 0}). تأكد أن المجلدات موجودة على هذا الجهاز.`
-            : `Scanned configured roots (${data.discoveredCount ?? 0} models found). Ensure folders exist on this machine.`
+            ? `تم فحص البارتيشن والمسارات (${scannedDrives || 'local'}) — عدد المكتشف: ${data.discoveredCount ?? 0}. تأكد من وجود مجلدات الموديلات.`
+            : `Scanned partitions & roots (${scannedDrives || 'local'}): ${data.discoveredCount ?? 0} model(s) found.`
         );
       }
     } catch (err: any) {
       setError(err.message);
     } finally {
       setIsAutoAssigning(false);
+    }
+  };
+
+  const handleScanPartitions = async (overwriteExisting = true) => {
+    setIsScanningPartitions(true);
+    setError(null);
+    setAutoAssignNotice(null);
+    try {
+      const res = await fetch('/api/models/scan-partitions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ overwriteExisting }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Partition scan failed');
+      if (Array.isArray(data.models)) {
+        setModelSlots(data.models);
+        syncSlotDrafts(data.models);
+      }
+      if (data.machine) setMachineEnv(data.machine);
+      if (data.partitionScan) setPartitionScan(data.partitionScan);
+      if (Array.isArray(data.searchRoots)) setSearchRootsDraft(data.searchRoots.join('\n'));
+      const assignedList = Array.isArray(data.assigned) ? data.assigned : [];
+      const scannedDrives = Array.isArray(data.scannedPartitions) ? data.scannedPartitions.join(', ') : '';
+      if (assignedList.length > 0) {
+        setAutoAssignNotice(
+          `${t.autoAssignedReadyNotice} ${assignedList.map((a: any) => `${a.slotId} → ${a.modelName}`).join(' · ')}${
+            scannedDrives ? ` · [${scannedDrives}]` : ''
+          }`
+        );
+      } else {
+        setAutoAssignNotice(
+          language === 'ar'
+            ? `تم مسح البارتيشن (${scannedDrives || 'C:, D:, E:'}) واكتشاف ${data.discoveredCount ?? 0} موديل في ${
+                data.discoveredRoots?.length ?? 0
+              } مسار.`
+            : `Scanned partitions (${scannedDrives || 'C:, D:, E:'}) and discovered ${data.discoveredCount ?? 0} model(s) across ${
+                data.discoveredRoots?.length ?? 0
+              } root(s).`
+        );
+      }
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setIsScanningPartitions(false);
     }
   };
 
@@ -542,11 +747,46 @@ const App = () => {
     }
   };
 
+  const handleInstallSingleBackend = async (pkgId: string, pipInstallSpec: string) => {
+    setInstallingPkgId(pkgId);
+    setError(null);
+    try {
+      const useCudaAware =
+        pkgId === 'torch' || pkgId === 'llama_cpp' || pkgId === 'onnxruntime' || Boolean(updateReport);
+      const res = await fetch(useCudaAware ? '/api/setup/auto-update' : '/api/setup/install-python', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(
+          useCudaAware
+            ? { packages: [pkgId], includeMissingCore: true }
+            : { packages: [pipInstallSpec] }
+        ),
+      });
+      const data = await res.json();
+      setPipInstallLog({
+        ok: Boolean(data.ok),
+        command:
+          (Array.isArray(data.commands) ? data.commands.join(' && ') : data.command) ||
+          `pip install --upgrade ${pipInstallSpec}`,
+        log:
+          [data.log, data.stdout, data.stderr, data.error].filter(Boolean).join('\n').trim() ||
+          (data.ok ? 'OK' : 'Failed'),
+      });
+      if (data.updateReport) setUpdateReport(data.updateReport);
+      if (data.machine) setMachineEnv(data.machine);
+      await fetchSetupStatus();
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setInstallingPkgId(null);
+    }
+  };
+
   const handleEnterStudioFromSetup = () => {
     if (typeof window !== 'undefined') {
       localStorage.setItem('hafiz_setup_done', '1');
     }
-    setActiveTab('studio');
+    navigateToTab('studio');
   };
 
   const fetchVramStatus = async () => {
@@ -865,6 +1105,7 @@ const App = () => {
 
   useEffect(() => {
     fetchModelsStatus();
+    checkBackendUpdates(false, true);
   }, []);
 
   useEffect(() => {
@@ -1972,7 +2213,7 @@ const App = () => {
           {/* Zone 2: Clean Single-Line Navigation Links */}
           <nav className="hidden md:flex items-center gap-6">
             <button
-              onClick={() => setActiveTab('studio')}
+              onClick={() => navigateToTab('studio')}
               className={`py-5 text-sm font-semibold border-b-2 transition-colors whitespace-nowrap shrink-0 ${
                 activeTab === 'studio'
                   ? 'border-indigo-600 text-indigo-600 dark:text-indigo-400 dark:border-indigo-400'
@@ -1982,7 +2223,7 @@ const App = () => {
               {t.navStudio}
             </button>
             <button
-              onClick={() => setActiveTab('audio')}
+              onClick={() => navigateToTab('audio')}
               className={`py-5 text-sm font-semibold border-b-2 transition-colors whitespace-nowrap shrink-0 ${
                 activeTab === 'audio'
                   ? 'border-indigo-600 text-indigo-600 dark:text-indigo-400 dark:border-indigo-400'
@@ -1993,7 +2234,7 @@ const App = () => {
             </button>
             <button
               onClick={() => {
-                setActiveTab('models');
+                navigateToTab('models');
                 fetchModelsStatus();
               }}
               className={`py-5 text-sm font-semibold border-b-2 transition-colors whitespace-nowrap shrink-0 ${
@@ -2006,7 +2247,7 @@ const App = () => {
             </button>
             <button
               onClick={() => {
-                setActiveTab('setup');
+                navigateToTab('setup');
                 fetchSetupStatus();
               }}
               className={`py-5 text-sm font-semibold border-b-2 transition-colors whitespace-nowrap shrink-0 ${
@@ -2045,7 +2286,7 @@ const App = () => {
             <button
               key={tab}
               onClick={() => {
-                setActiveTab(tab);
+                navigateToTab(tab);
                 if (tab === 'models') fetchModelsStatus();
                 if (tab === 'setup') fetchSetupStatus();
               }}
@@ -2071,6 +2312,63 @@ const App = () => {
       {/* MAIN WORKSPACE CONTENT                                                */}
       {/* ===================================================================== */}
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 py-6 space-y-6">
+        {/* Startup Online Backend & CUDA Auto-Update Banner */}
+        {(isAutoUpdating || autoUpdateNotice || (updateReport && (updateReport.outdatedCount > 0 || updateReport.cudaUpgradeCount > 0))) && (
+          <div className="p-3.5 rounded-xl border border-indigo-200 dark:border-indigo-900/70 bg-indigo-50/70 dark:bg-indigo-950/30 text-indigo-800 dark:text-indigo-200 flex flex-wrap items-center justify-between gap-3 text-xs">
+            <div className="flex items-center gap-2.5 min-w-0">
+              <RefreshCw size={15} className={`shrink-0 ${isAutoUpdating ? 'animate-spin' : ''}`} />
+              <span className="font-semibold">
+                {isAutoUpdating
+                  ? t.setupUpdatesUpdating
+                  : autoUpdateNotice
+                  ? autoUpdateNotice
+                  : language === 'ar'
+                  ? `متاح أونلاين: ${updateReport?.outdatedCount ?? 0} تحديث مكتبة و ${updateReport?.cudaUpgradeCount ?? 0} ترقية CUDA لتسريع الأداء.`
+                  : `Online updates found: ${updateReport?.outdatedCount ?? 0} package(s) and ${updateReport?.cudaUpgradeCount ?? 0} CUDA upgrade(s).`}
+              </span>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              {updateReport && (updateReport.outdatedCount > 0 || updateReport.cudaUpgradeCount > 0) && (
+                <button
+                  type="button"
+                  onClick={() => handleAutoUpdateAll(false)}
+                  disabled={isAutoUpdating}
+                  className="h-8 px-3 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-semibold disabled:opacity-40 whitespace-nowrap"
+                >
+                  {isAutoUpdating ? t.setupUpdatesUpdating : t.setupUpdatesAutoBtn}
+                </button>
+              )}
+              {autoUpdateNotice && (
+                <button
+                  type="button"
+                  onClick={() => setAutoUpdateNotice(null)}
+                  className="p-1 text-indigo-500 hover:text-indigo-700 dark:hover:text-white"
+                >
+                  <X size={14} />
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Startup Auto-Bound Partition Models Notice (inside Studio/Audio) */}
+        {autoAssignNotice && (activeTab === 'studio' || activeTab === 'audio') && (
+          <div className="p-3.5 rounded-xl border border-emerald-200 dark:border-emerald-900/70 bg-emerald-50/70 dark:bg-emerald-950/30 text-emerald-800 dark:text-emerald-200 flex items-center justify-between gap-3 text-xs">
+            <div className="flex items-center gap-2.5 min-w-0">
+              <CheckCircle2 size={15} className="shrink-0" />
+              <span className="font-semibold">{autoAssignNotice}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setAutoAssignNotice(null)}
+              className="p-1 text-emerald-600 hover:text-emerald-800 dark:hover:text-white shrink-0"
+              aria-label={t.close}
+            >
+              <X size={14} />
+            </button>
+          </div>
+        )}
+
         {/* Global Error Banner */}
         {error && (
           <div className="p-4 rounded-xl border border-red-200 dark:border-red-900/60 bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 flex items-center justify-between gap-3">
@@ -2987,11 +3285,19 @@ const App = () => {
                 <div className="flex flex-wrap items-center gap-2 shrink-0">
                   <button
                     type="button"
-                    onClick={() => handleAutoAssignModels(true)}
-                    disabled={isAutoAssigning}
+                    onClick={() => handleScanPartitions(true)}
+                    disabled={isScanningPartitions || isAutoAssigning}
                     className="h-10 px-4 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold flex items-center gap-2 transition-colors disabled:opacity-40 whitespace-nowrap"
                   >
                     <Zap size={14} />
+                    <span>{isScanningPartitions ? t.scanningPartitions : t.scanAllPartitionsBtn}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleAutoAssignModels(true)}
+                    disabled={isAutoAssigning || isScanningPartitions}
+                    className="h-10 px-3.5 rounded-xl border border-indigo-200 dark:border-indigo-800 bg-indigo-50 dark:bg-indigo-950/40 text-indigo-700 dark:text-indigo-300 hover:bg-indigo-100 dark:hover:bg-indigo-900/60 text-xs font-semibold flex items-center gap-2 transition-colors disabled:opacity-40 whitespace-nowrap"
+                  >
                     <span>{isAutoAssigning ? t.autoAssignRunning : t.autoAssignBtn}</span>
                   </button>
                   <button
@@ -3004,6 +3310,18 @@ const App = () => {
                   </button>
                 </div>
               </div>
+
+              {partitionScan && (
+                <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-600 dark:text-slate-400">
+                  <span className="font-semibold">{t.partitionsScannedLabel}</span>
+                  <span className="font-mono font-semibold text-slate-900 dark:text-slate-100" dir="ltr">
+                    {partitionScan.scannedPartitions.join(' · ')}
+                  </span>
+                  <span className="font-mono tabular-nums" dir="ltr">
+                    ({partitionScan.discoveredModelsCount} models · {partitionScan.discoveredRoots.length} roots · {partitionScan.durationMs}ms)
+                  </span>
+                </div>
+              )}
 
               {autoAssignNotice && (
                 <div className="p-3 rounded-xl border border-emerald-200 dark:border-emerald-800 bg-emerald-50/70 dark:bg-emerald-950/30 text-xs text-emerald-700 dark:text-emerald-300 font-medium">
@@ -3759,65 +4077,173 @@ const App = () => {
               </section>
             )}
 
-            {/* Section 1: Direct Downloads & One-Click Launcher Files */}
+            {/* Section 0: Online PyPI Backends, Speed Accelerators & CUDA Upgrade Checker */}
             <section className="bg-white dark:bg-[#13161C] border border-slate-200 dark:border-slate-800 rounded-2xl p-6 shadow-sm space-y-4">
-              <div>
-                <h2 className="text-base font-bold text-slate-900 dark:text-white">
-                  {t.setupDownloadFilesTitle}
-                </h2>
-                <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">{t.setupDownloadFilesDesc}</p>
+              <div className="flex flex-wrap items-start justify-between gap-4">
+                <div className="max-w-2xl">
+                  <h2 className="text-base font-bold text-slate-900 dark:text-white flex items-center gap-2">
+                    <Zap size={18} className="text-indigo-600 dark:text-indigo-400 shrink-0" />
+                    <span>{t.setupUpdatesTitle}</span>
+                  </h2>
+                  <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">{t.setupUpdatesSubtitle}</p>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => checkBackendUpdates(true, false)}
+                    disabled={isCheckingUpdates || isAutoUpdating}
+                    className="h-9 px-3.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 text-xs font-semibold flex items-center gap-1.5 transition-colors disabled:opacity-40 whitespace-nowrap"
+                  >
+                    <RefreshCw size={13} className={isCheckingUpdates ? 'animate-spin' : ''} />
+                    <span>{isCheckingUpdates ? t.setupUpdatesChecking : t.setupUpdatesCheckBtn}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleAutoUpdateAll(true)}
+                    disabled={isAutoUpdating || isCheckingUpdates || !machineEnv?.pythonAvailable}
+                    className="h-9 px-4 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold flex items-center gap-1.5 transition-colors disabled:opacity-40 whitespace-nowrap"
+                  >
+                    <Zap size={13} />
+                    <span>{isAutoUpdating ? t.setupUpdatesUpdating : t.setupUpdatesAutoBtn}</span>
+                  </button>
+                </div>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3" dir="ltr">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-3 border-t border-slate-200 dark:border-slate-800 text-xs">
+                <div className="p-3 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#0B0D11]">
+                  <div className="text-slate-500 dark:text-slate-400">NVIDIA CUDA</div>
+                  <div
+                    className={`font-mono font-semibold mt-1 ${
+                      updateReport?.cudaStatus.needsCudaUpgrade
+                        ? 'text-amber-600 dark:text-amber-400'
+                        : updateReport?.cudaStatus.nvidiaGpuAvailable
+                        ? 'text-emerald-600 dark:text-emerald-400'
+                        : 'text-slate-700 dark:text-slate-300'
+                    }`}
+                    dir="ltr"
+                  >
+                    {updateReport
+                      ? updateReport.cudaStatus.nvidiaGpuAvailable
+                        ? `${updateReport.cudaStatus.nvidiaGpuName || 'NVIDIA'} · Driver CUDA ${
+                            updateReport.cudaStatus.nvidiaDriverCuda || '?'
+                          } · torch ${updateReport.cudaStatus.torchCudaVersion || 'CPU'}`
+                        : t.noNvidiaGpuLabel
+                      : '—'}
+                  </div>
+                </div>
+
+                <div className="p-3 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#0B0D11]">
+                  <div className="text-slate-500 dark:text-slate-400">{t.setupUpdateAvailable}</div>
+                  <div className="font-mono font-semibold mt-1 tabular-nums text-slate-900 dark:text-slate-100" dir="ltr">
+                    {updateReport
+                      ? `${updateReport.outdatedCount} outdated · ${updateReport.cudaUpgradeCount} CUDA upgrade(s)`
+                      : '—'}
+                  </div>
+                </div>
+
+                <div className="p-3 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#0B0D11] flex items-center">
+                  <label className="inline-flex items-center gap-2 text-xs font-medium text-slate-700 dark:text-slate-300 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={autoUpdateOnLaunch}
+                      onChange={(e) => handleToggleAutoUpdateOnLaunch(e.target.checked)}
+                      className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+                    />
+                    <span>{t.setupUpdatesAutoLaunchLabel}</span>
+                  </label>
+                </div>
+              </div>
+
+              {updateReport && updateReport.items.some((i) => i.status === 'update_available' || i.status === 'cuda_upgrade_needed') && (
+                <div className="space-y-1.5 pt-2">
+                  {updateReport.items
+                    .filter((i) => i.status === 'update_available' || i.status === 'cuda_upgrade_needed')
+                    .map((item) => (
+                      <div
+                        key={`upd-${item.id}`}
+                        className="px-3.5 py-2 rounded-lg border border-amber-200 dark:border-amber-900/60 bg-amber-50/60 dark:bg-amber-950/20 flex flex-wrap items-center justify-between gap-2 text-xs"
+                        dir="ltr"
+                      >
+                        <span className="font-mono font-bold text-slate-900 dark:text-slate-100">
+                          {item.pipName}: {item.installedVersion || '?'} → {item.latestVersion || 'CUDA 12.4'}
+                        </span>
+                        <span className="text-amber-700 dark:text-amber-300 font-medium">
+                          {item.cudaNote || t.setupUpdateAvailable}
+                        </span>
+                      </div>
+                    ))}
+                </div>
+              )}
+            </section>
+
+            {/* Section 1: Standalone setup.exe & Setup Package Files */}
+            <section className="bg-white dark:bg-[#13161C] border border-slate-200 dark:border-slate-800 rounded-2xl p-6 shadow-sm space-y-5">
+              <div className="flex flex-wrap items-start justify-between gap-4">
+                <div>
+                  <h2 className="text-base font-bold text-slate-900 dark:text-white">
+                    {t.setupDownloadFilesTitle}
+                  </h2>
+                  <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">{t.setupDownloadFilesDesc}</p>
+                </div>
+                <a
+                  href="/api/setup/download/setup.exe"
+                  download="setup.exe"
+                  className="h-10 px-4 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold inline-flex items-center gap-2 transition-colors whitespace-nowrap shrink-0"
+                  dir="ltr"
+                >
+                  <Download size={15} />
+                  <span>setup.exe (Windows Installer)</span>
+                </a>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3" dir="ltr">
                 {[
+                  {
+                    file: 'setup.exe',
+                    label: 'setup.exe',
+                    featured: true,
+                    descAr: 'ملف التثبيت التنفيذي الوحيد لنظام ويندوز — يثبت كل النواقص ويربط الموديلات ويفتح البرنامج',
+                    descEn: 'Standalone Windows .exe installer & launcher',
+                  },
                   {
                     file: 'requirements.txt',
                     label: 'requirements.txt',
+                    featured: false,
                     descAr: 'كل مكتبات Python المطلوبة للـ GGUF و HF و ASR و TTS',
                     descEn: 'All Python ML dependencies',
                   },
                   {
                     file: 'setup.py',
                     label: 'setup.py',
+                    featured: false,
                     descAr: 'ملف حزمة التثبيت (pip install -e .)',
                     descEn: 'Python package installer',
                   },
                   {
-                    file: 'install_backends.bat',
-                    label: 'install_backends.bat',
-                    descAr: 'مثبّت ويندوز بضغطة واحدة مع دعم CUDA لكارت NVIDIA',
-                    descEn: 'Windows 1-click CUDA installer',
-                  },
-                  {
-                    file: 'start_hafiz.bat',
-                    label: 'start_hafiz.bat',
-                    descAr: 'ملف التشغيل: تضغط عليه يشغّل السيرفر ويفتح المتصفح',
-                    descEn: 'Windows double-click app launcher',
-                  },
-                  {
                     file: 'backends_manifest.json',
                     label: 'models/backends_manifest.json',
+                    featured: false,
                     descAr: 'ملف الداتا للمكتبات ومسارات الموديلات وتوصيات التوزيع',
                     descEn: 'Backends & auto-assign data manifest',
                   },
                   {
-                    file: 'install_backends.sh',
-                    label: 'install_backends.sh',
-                    descAr: 'مثبّت Linux / macOS',
-                    descEn: 'Linux / macOS installer',
-                  },
-                  {
-                    file: 'start_hafiz.sh',
-                    label: 'start_hafiz.sh',
-                    descAr: 'ملف تشغيل Linux / macOS',
-                    descEn: 'Linux / macOS launcher',
+                    file: 'start_hafiz.bat',
+                    label: 'start_hafiz.bat',
+                    featured: false,
+                    descAr: 'تشغيل سريع مباشر للبرنامج على localhost:3000',
+                    descEn: 'Quick Windows studio launcher',
                   },
                 ].map((item) => (
                   <a
                     key={item.file}
                     href={`/api/setup/download/${encodeURIComponent(item.file)}`}
                     download={item.file}
-                    className="p-3.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#0B0D11] hover:border-indigo-500/70 transition-colors flex flex-col justify-between gap-2"
+                    className={`p-3.5 rounded-xl border transition-colors flex flex-col justify-between gap-2 ${
+                      item.featured
+                        ? 'border-indigo-500/70 bg-indigo-50/70 dark:bg-indigo-950/30 hover:border-indigo-400'
+                        : 'border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#0B0D11] hover:border-indigo-500/70'
+                    }`}
                   >
                     <div>
                       <div className="flex items-center justify-between gap-2">
@@ -3833,6 +4259,136 @@ const App = () => {
                   </a>
                 ))}
               </div>
+
+              {/* Automatic Missing Requirements & Direct Download Links */}
+              {(() => {
+                const missingTools = (setupManifest?.systemPrerequisites || []).filter((tool: any) => {
+                  if (tool.id === 'python') return !machineEnv?.pythonAvailable;
+                  if (tool.id === 'ffmpeg') return !machineEnv?.ffmpegAvailable;
+                  if (tool.id === 'cuda') return !machineEnv?.nvidiaGpuAvailable;
+                  return false;
+                });
+                const missingPkgs = (setupManifest?.backends || []).filter(
+                  (b: any) => !machineEnv?.pythonPackages?.[b.id]
+                );
+                const unboundSlots = modelSlots.filter(
+                  (s) => s.activeAdapter === 'fallback_ai' && !s.inheritedFrom
+                );
+                const totalMissing = missingTools.length + missingPkgs.length + unboundSlots.length;
+
+                return (
+                  <div className="pt-4 border-t border-slate-200 dark:border-slate-800 space-y-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div>
+                        <h3 className="text-sm font-bold text-slate-900 dark:text-white">
+                          {t.setupMissingLinksTitle}
+                        </h3>
+                        <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                          {totalMissing === 0 ? t.setupAllReadyMsg : t.setupMissingLinksDesc}
+                        </p>
+                      </div>
+                    </div>
+
+                    {totalMissing > 0 && (
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
+                        {missingTools.map((tool: any) => (
+                          <div
+                            key={`tool-${tool.id}`}
+                            className="p-3 rounded-xl border border-amber-300/70 dark:border-amber-800/70 bg-amber-50/50 dark:bg-amber-950/20 flex items-center justify-between gap-3"
+                          >
+                            <div className="min-w-0">
+                              <div className="text-xs font-bold text-slate-900 dark:text-slate-100" dir="ltr">
+                                {tool.name}
+                              </div>
+                              <p className="text-[11px] text-slate-600 dark:text-slate-400 truncate">
+                                {language === 'ar' ? tool.descAr : tool.descEn}
+                              </p>
+                            </div>
+                            <a
+                              href={tool.downloadUrl}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="h-8 px-3 rounded-lg bg-amber-600 hover:bg-amber-500 text-white text-[11px] font-semibold inline-flex items-center gap-1.5 shrink-0 whitespace-nowrap"
+                            >
+                              <ExternalLink size={12} />
+                              <span>{t.setupDirectDownloadBtn}</span>
+                            </a>
+                          </div>
+                        ))}
+
+                        {missingPkgs.map((pkg: any) => {
+                          const isThisInstalling = installingPkgId === pkg.id;
+                          return (
+                            <div
+                              key={`pkg-${pkg.id}`}
+                              className="p-3 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#0B0D11] flex items-center justify-between gap-2.5"
+                            >
+                              <div className="min-w-0">
+                                <div className="text-xs font-mono font-bold text-slate-900 dark:text-slate-100 truncate" dir="ltr">
+                                  {pkg.pipName} &gt;= {pkg.minVersion}
+                                </div>
+                                <p className="text-[11px] text-slate-500 dark:text-slate-400 truncate">
+                                  {language === 'ar' ? pkg.requiredForAr : pkg.requiredForEn}
+                                </p>
+                              </div>
+                              <div className="flex items-center gap-1.5 shrink-0">
+                                <button
+                                  type="button"
+                                  disabled={isThisInstalling || isInstallingPip || !machineEnv?.pythonAvailable}
+                                  onClick={() => handleInstallSingleBackend(pkg.id, pkg.pipInstallSpec || pkg.pipName)}
+                                  className="h-8 px-2.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[11px] font-semibold disabled:opacity-40 whitespace-nowrap"
+                                >
+                                  {isThisInstalling ? t.setupInstallingPkg : t.setupInstallNowBtn}
+                                </button>
+                                {pkg.downloadUrl && (
+                                  <a
+                                    href={pkg.downloadUrl}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="h-8 px-2.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 hover:border-indigo-500 text-slate-700 dark:text-slate-200 text-[11px] font-semibold inline-flex items-center gap-1 whitespace-nowrap"
+                                  >
+                                    <ExternalLink size={12} />
+                                    <span>{t.setupDirectDownloadBtn}</span>
+                                  </a>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })}
+
+                        {unboundSlots.map((slot) => {
+                          const rec = setupManifest?.slotRecommendations?.[slot.id];
+                          if (!rec?.downloadUrl) return null;
+                          return (
+                            <div
+                              key={`slot-${slot.id}`}
+                              className="p-3 rounded-xl border border-indigo-200 dark:border-indigo-900/70 bg-indigo-50/40 dark:bg-indigo-950/20 flex items-center justify-between gap-2.5"
+                            >
+                              <div className="min-w-0">
+                                <div className="text-xs font-bold text-slate-900 dark:text-slate-100 truncate">
+                                  {language === 'ar' ? slot.nameAr : slot.nameEn}
+                                </div>
+                                <p className="text-[11px] text-slate-500 dark:text-slate-400 truncate">
+                                  {rec.downloadLabel} — {t.setupModelsDropHint}
+                                </p>
+                              </div>
+                              <a
+                                href={rec.downloadUrl}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="h-8 px-3 rounded-lg border border-indigo-300 dark:border-indigo-700 bg-white dark:bg-slate-900 hover:border-indigo-500 text-indigo-700 dark:text-indigo-300 text-[11px] font-semibold inline-flex items-center gap-1 shrink-0 whitespace-nowrap"
+                              >
+                                <ExternalLink size={12} />
+                                <span>{t.setupDirectDownloadBtn}</span>
+                              </a>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
             </section>
 
             {/* Section 2: Fixed Model Paths & Auto-Assign Control */}
@@ -3847,6 +4403,15 @@ const App = () => {
                 <div className="flex flex-wrap items-center gap-2">
                   <button
                     type="button"
+                    onClick={() => handleScanPartitions(true)}
+                    disabled={isScanningPartitions || isAutoAssigning}
+                    className="h-9 px-4 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold flex items-center gap-1.5 transition-colors disabled:opacity-40 whitespace-nowrap"
+                  >
+                    <Zap size={14} />
+                    <span>{isScanningPartitions ? t.scanningPartitions : t.scanAllPartitionsBtn}</span>
+                  </button>
+                  <button
+                    type="button"
                     onClick={handleSaveSearchRoots}
                     disabled={isSavingRoots}
                     className="h-9 px-3.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 text-xs font-semibold transition-colors disabled:opacity-40 whitespace-nowrap"
@@ -3856,14 +4421,25 @@ const App = () => {
                   <button
                     type="button"
                     onClick={() => handleAutoAssignModels(true)}
-                    disabled={isAutoAssigning}
-                    className="h-9 px-4 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold flex items-center gap-1.5 transition-colors disabled:opacity-40 whitespace-nowrap"
+                    disabled={isAutoAssigning || isScanningPartitions}
+                    className="h-9 px-3.5 rounded-lg border border-indigo-200 dark:border-indigo-800 bg-indigo-50 dark:bg-indigo-950/40 text-indigo-700 dark:text-indigo-300 hover:bg-indigo-100 dark:hover:bg-indigo-900/60 text-xs font-semibold flex items-center gap-1.5 transition-colors disabled:opacity-40 whitespace-nowrap"
                   >
-                    <Zap size={14} />
                     <span>{isAutoAssigning ? t.autoAssignRunning : t.setupApplyAuditBtn}</span>
                   </button>
                 </div>
               </div>
+
+              {partitionScan && (
+                <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-600 dark:text-slate-400">
+                  <span className="font-semibold">{t.partitionsScannedLabel}</span>
+                  <span className="font-mono font-semibold text-slate-900 dark:text-slate-100" dir="ltr">
+                    {partitionScan.scannedPartitions.join(' · ')}
+                  </span>
+                  <span className="font-mono tabular-nums" dir="ltr">
+                    ({partitionScan.discoveredModelsCount} models · {partitionScan.discoveredRoots.length} roots)
+                  </span>
+                </div>
+              )}
 
               <textarea
                 value={searchRootsDraft}
@@ -3879,6 +4455,99 @@ const App = () => {
                   {autoAssignNotice}
                 </div>
               )}
+            </section>
+
+            {/* Section 2b: Visual Models Folder Tree Guide (models/local/) */}
+            <section className="bg-white dark:bg-[#13161C] border border-slate-200 dark:border-slate-800 rounded-2xl p-6 shadow-sm space-y-4">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <h2 className="text-base font-bold text-slate-900 dark:text-white flex items-center gap-2">
+                    <FolderOpen size={18} className="text-indigo-600 dark:text-indigo-400 shrink-0" />
+                    <span>{t.setupTreeTitle}</span>
+                  </h2>
+                  <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">{t.setupTreeSubtitle}</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const treeText = [
+                      'Hafiz-BelAmya/',
+                      '├── setup.exe',
+                      '├── requirements.txt',
+                      '└── models/',
+                      '    └── local/',
+                      '        ├── NAMAA-Space/Cohere-Speech-Tashkeel-2B/            -> ASR (السماع بالتشكيل)',
+                      '        ├── models--mobiuslabsgmbh--faster-whisper-large-v3-turbo/ -> ASR السريع',
+                      '        ├── Qwen3.5-9B-Q4_K_M-GGUF/                         -> الموديل الذكي + القوافي + الويب + هات تشكيل + البرومبت',
+                      '        ├── Nile-Chat-4B-GGUF/                              -> اختياري: عامية مصرية للقوافي وإعادة الصياغة',
+                      '        ├── VoiceTut-Egyptian-Tashkeel-GGUF/                -> اختياري: تشكيل نصي فقط (لا يوضع في القراءة الصوتية)',
+                      '        ├── OmniVoice/models/OmniVoice/model.safetensors    -> القراءة الصوتية TTS + استنساخ الأصوات',
+                      '        └── VoiceTut-TTS-GGUF/                              -> موديل صوتي إضافي لخانة القراءة',
+                    ].join('\n');
+                    navigator.clipboard?.writeText(treeText);
+                  }}
+                  className="h-8 px-3 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 hover:border-indigo-500 text-xs font-semibold inline-flex items-center gap-1.5 shrink-0"
+                >
+                  <Copy size={13} />
+                  <span>{t.setupTreeCopyBtn}</span>
+                </button>
+              </div>
+
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
+                <pre
+                  dir="ltr"
+                  className="lg:col-span-7 p-4 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#0B0D11] text-[11px] sm:text-xs font-mono text-slate-800 dark:text-slate-200 overflow-x-auto leading-relaxed"
+                >{`Hafiz-BelAmya/
+├── setup.exe                   # ملف التسطيب والتشغيل الوحيد
+└── models/
+    └── local/                  # ضع كل موديل بفولدره هنا
+        ├── NAMAA-Space/
+        │   └── Cohere-Speech-Tashkeel-2B/
+        ├── models--mobiuslabsgmbh--faster-whisper-large-v3-turbo/
+        ├── Qwen3.5-9B-Q4_K_M-GGUF/
+        ├── Nile-Chat-4B-GGUF/
+        ├── VoiceTut-Egyptian-Tashkeel-GGUF/
+        ├── OmniVoice/
+        │   └── models/OmniVoice/model.safetensors
+        └── VoiceTut-TTS-GGUF/`}</pre>
+
+                <div className="lg:col-span-5 space-y-2">
+                  {[
+                    {
+                      folder: 'NAMAA-Space/Cohere-Speech-Tashkeel-2B',
+                      slotAr: 'السماع والكتابة بالتشكيل (ASR)',
+                      slotEn: 'Speech-to-Diacritized ASR',
+                    },
+                    {
+                      folder: 'Qwen3.5-9B-Q4_K_M-GGUF',
+                      slotAr: 'الموديل الذكي + القوافي + إيجنت الويب + هات تشكيل + البرومبتات',
+                      slotEn: 'Smart Core + Rhymes + Web Agent + Search + Prompts',
+                    },
+                    {
+                      folder: 'OmniVoice (أو VoiceTut-TTS-GGUF)',
+                      slotAr: 'القراءة الصوتية بالتشكيل (TTS) + استنساخ الأصوات',
+                      slotEn: 'Diacritic TTS Reader + Voice Clone',
+                    },
+                    {
+                      folder: 'Nile-Chat-4B-GGUF / VoiceTut-Egyptian-Tashkeel-GGUF',
+                      slotAr: 'اختياري: مهام النص والقوافي فقط (ممنوع للـ TTS)',
+                      slotEn: 'Optional text/rhyme models (never put in TTS)',
+                    },
+                  ].map((row) => (
+                    <div
+                      key={row.folder}
+                      className="p-3 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#0B0D11]"
+                    >
+                      <div className="text-[11px] font-mono font-bold text-indigo-600 dark:text-indigo-400 truncate" dir="ltr">
+                        models/local/{row.folder}
+                      </div>
+                      <div className="text-xs text-slate-700 dark:text-slate-300 mt-1">
+                        {language === 'ar' ? row.slotAr : row.slotEn}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
             </section>
 
             {/* Section 3: Model Placement Audit Table (From Your Disk & Screenshots) */}
@@ -3940,12 +4609,18 @@ const App = () => {
                       <tr>
                         <th className="py-3 px-4 font-semibold text-start">{t.setupPkgCol}</th>
                         <th className="py-3 px-4 font-semibold text-start">{t.setupStatusCol}</th>
+                        <th className="py-3 px-4 font-semibold text-start">{t.setupVersionCol}</th>
+                        <th className="py-3 px-4 font-semibold text-start">{t.setupLatestCol}</th>
                         <th className="py-3 px-4 font-semibold text-start">{t.setupPurposeCol}</th>
+                        <th className="py-3 px-4 font-semibold text-start">{t.setupActionCol}</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-200 dark:divide-slate-800">
                       {setupManifest.backends.map((b: any) => {
                         const installed = Boolean(machineEnv?.pythonPackages?.[b.id]);
+                        const isThisInstalling = installingPkgId === b.id;
+                        const updItem = updateReport?.items.find((it) => it.id === b.id || it.pipName === b.pipName);
+                        const hasUpgrade = updItem?.status === 'update_available' || updItem?.status === 'cuda_upgrade_needed';
                         return (
                           <tr key={b.id} className="hover:bg-slate-50/70 dark:hover:bg-[#0E1015]/60">
                             <td className="py-3 px-4 font-mono font-semibold text-slate-900 dark:text-slate-100 whitespace-nowrap" dir="ltr">
@@ -3954,18 +4629,65 @@ const App = () => {
                             <td className="py-3 px-4 whitespace-nowrap">
                               <span
                                 className={`font-semibold ${
-                                  installed
+                                  updItem?.status === 'cuda_upgrade_needed'
+                                    ? 'text-amber-600 dark:text-amber-400'
+                                    : updItem?.status === 'update_available'
+                                    ? 'text-indigo-600 dark:text-indigo-400'
+                                    : installed
                                     ? 'text-emerald-600 dark:text-emerald-400'
                                     : b.optional
                                     ? 'text-slate-500 dark:text-slate-400'
                                     : 'text-amber-600 dark:text-amber-400'
                                 }`}
                               >
-                                {installed ? t.setupInstalled : t.setupMissing}
+                                {updItem?.status === 'cuda_upgrade_needed'
+                                  ? t.setupCudaUpgradeNeeded
+                                  : updItem?.status === 'update_available'
+                                  ? t.setupUpdateAvailable
+                                  : installed
+                                  ? t.setupInstalled
+                                  : t.setupMissing}
                               </span>
+                            </td>
+                            <td className="py-3 px-4 font-mono text-slate-600 dark:text-slate-400 whitespace-nowrap tabular-nums" dir="ltr">
+                              {updItem?.installedVersion || (installed ? '—' : '—')}
+                            </td>
+                            <td className="py-3 px-4 font-mono text-slate-700 dark:text-slate-300 whitespace-nowrap tabular-nums" dir="ltr">
+                              {updItem?.latestVersion || (updateReport && !updateReport.onlineReachable ? t.setupOfflineStatus : '—')}
                             </td>
                             <td className="py-3 px-4 text-slate-600 dark:text-slate-300 leading-relaxed">
                               {language === 'ar' ? b.requiredForAr : b.requiredForEn}
+                            </td>
+                            <td className="py-3 px-4 whitespace-nowrap">
+                              {installed && !hasUpgrade ? (
+                                <span className="text-emerald-600 dark:text-emerald-400 font-semibold">—</span>
+                              ) : (
+                                <div className="flex items-center gap-2">
+                                  <button
+                                    type="button"
+                                    disabled={isThisInstalling || isInstallingPip || isAutoUpdating || !machineEnv?.pythonAvailable}
+                                    onClick={() => handleInstallSingleBackend(b.id, b.pipInstallSpec || b.pipName)}
+                                    className="h-7 px-2.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[11px] font-semibold disabled:opacity-40"
+                                  >
+                                    {isThisInstalling
+                                      ? t.setupInstallingPkg
+                                      : hasUpgrade
+                                      ? t.setupUpdateAvailable
+                                      : t.setupInstallNowBtn}
+                                  </button>
+                                  {(b.downloadUrl || b.pypiUrl) && (
+                                    <a
+                                      href={b.downloadUrl || b.pypiUrl}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                      className="h-7 px-2.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 hover:border-indigo-500 text-slate-700 dark:text-slate-200 text-[11px] font-semibold inline-flex items-center gap-1"
+                                    >
+                                      <ExternalLink size={11} />
+                                      <span>{t.setupDirectDownloadBtn}</span>
+                                    </a>
+                                  )}
+                                </div>
+                              )}
                             </td>
                           </tr>
                         );

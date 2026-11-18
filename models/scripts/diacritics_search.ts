@@ -10,6 +10,8 @@
  *  5. Curated Egyptian Colloquial + Phonetic Suno + Classical Seed Lexicon & Morphology
  */
 
+import { smartConvertEgyptianQaf } from '../../src/utils/arabicDiacritics.ts';
+
 export interface DiacriticSearchVariant {
   word: string;
   type: 'colloquial_egyptian' | 'phonetic_suno' | 'classical_fusha' | 'gender_variant';
@@ -126,8 +128,8 @@ export const DIACRITIC_SOURCES_CATALOG = [
   },
   {
     id: 'phonetic_suno',
-    labelAr: 'التشفير الصوتي الغنائي لسونو (سكون آخر حرف + همزة القاف ء/ئ)',
-    labelEn: 'Phonetic Sukoon & Hamza (Suno Encoding)',
+    labelAr: 'التشفير الصوتي الغنائي لسونو (سكون آخر حرف + همزة القاف الذكية أ/ئ/ء)',
+    labelEn: 'Phonetic Sukoon & Smart Hamza (Suno Encoding)',
   },
 ];
 
@@ -136,8 +138,8 @@ const MULTI_READING_LEXICON: Record<string, DiacriticSearchVariant[]> = {
   'قلبك': [
     { word: 'قَلْبَكْ', type: 'colloquial_egyptian', typeLabelAr: 'عامي مصري (مذكر)', typeLabelEn: 'Egyptian (M)', meaning: 'قلبك أنت (للمذكر) — بفتح الكاف وسكونها', source: 'Egyptian Colloquial Lexicon' },
     { word: 'قَلْبِكْ', type: 'colloquial_egyptian', typeLabelAr: 'عامي مصري (مؤنث)', typeLabelEn: 'Egyptian (F)', meaning: 'قلبك أنتِ (للمؤنث) — بكسر الكاف وسكونها', source: 'Egyptian Colloquial Lexicon' },
-    { word: 'ءَلْبَكْ', type: 'phonetic_suno', typeLabelAr: 'صوتي سونو (مذكر)', typeLabelEn: 'Phonetic (M)', meaning: 'النطق القاهري الصوتي لسونو للمذكر بتحويل القاف همزة', source: 'Phonetic Sukoon Rules' },
-    { word: 'ءَلْبِكْ', type: 'phonetic_suno', typeLabelAr: 'صوتي سونو (مؤنث)', typeLabelEn: 'Phonetic (F)', meaning: 'النطق القاهري الصوتي لسونو للمؤنث بتحويل القاف همزة', source: 'Phonetic Sukoon Rules' },
+    { word: 'أَلْبَكْ', type: 'phonetic_suno', typeLabelAr: 'صوتي سونو (مذكر)', typeLabelEn: 'Phonetic (M)', meaning: 'النطق القاهري الصوتي لسونو للمذكر بتحويل القاف الأولية إلى (أ)', source: 'Phonetic Sukoon Rules' },
+    { word: 'أَلْبِكْ', type: 'phonetic_suno', typeLabelAr: 'صوتي سونو (مؤنث)', typeLabelEn: 'Phonetic (F)', meaning: 'النطق القاهري الصوتي لسونو للمؤنث بتحويل القاف الأولية إلى (أ)', source: 'Phonetic Sukoon Rules' },
     { word: 'قَلْبُكَ', type: 'classical_fusha', typeLabelAr: 'فصحى (مرفوع)', typeLabelEn: 'Classical (Nom)', meaning: 'فؤادك في حالة الرفع بالفصحى', source: 'Classical Grammar' },
   ],
   'يهديك': [
@@ -182,7 +184,7 @@ const MULTI_READING_LEXICON: Record<string, DiacriticSearchVariant[]> = {
   ],
   'قال': [
     { word: 'قَالْ', type: 'colloquial_egyptian', typeLabelAr: 'عامي مصري (قاف)', typeLabelEn: 'Said (Qaf)', meaning: 'تحدث أو حكى (مع الحفاظ على القاف)', source: 'Egyptian Colloquial Lexicon' },
-    { word: 'ءَالْ', type: 'phonetic_suno', typeLabelAr: 'صوتي سونو (همزة)', typeLabelEn: 'Said (Phonetic)', meaning: 'نطقها القاهري الصوتي بتحويل القاف همزة', source: 'Phonetic Sukoon Rules' },
+    { word: 'أَالْ', type: 'phonetic_suno', typeLabelAr: 'صوتي سونو (همزة)', typeLabelEn: 'Said (Phonetic)', meaning: 'نطقها القاهري الصوتي بتحويل القاف الأولية إلى (أ)', source: 'Phonetic Sukoon Rules' },
     { word: 'قَالَ', type: 'classical_fusha', typeLabelAr: 'فصحى', typeLabelEn: 'Classical', meaning: 'فعل ماضٍ مبني على الفتح', source: 'Classical Grammar' },
   ],
 };
@@ -372,7 +374,7 @@ async function searchWebForDiacriticsSites(
 function buildMorphologicalHints(cleanWord: string): string[] {
   const hints: string[] = [];
   if (cleanWord.includes('ق')) {
-    hints.push(`يحتوي على حرف القاف (ق): أظهر التشكيل بالحفاظ على (ق) للعامية المتصلة، وبهمزة (ء/ئ) للتشفير الصوتي لسونو.`);
+    hints.push(`يحتوي على حرف القاف (ق): أظهر التشكيل بالحفاظ على (ق) للعامية المتصلة، وبهمزة ذكية (أ / ئ / ء) حسب موقع القاف وحركاتها للتشفير الصوتي لسونو.`);
   }
   if (cleanWord.endsWith('ك')) {
     hints.push(`ينتهي بكاف الخطاب (ك): أظهر صيغة المذكر (ـَكْ) وصيغة المؤنث (ـِكْ) بوضوح.`);
@@ -514,6 +516,21 @@ export async function runDiacriticsSearchScript(
     }
   }
 
+  if (query.includes('ق') && !lexiconHits.some((h) => h.type === 'phonetic_suno')) {
+    const smartPhonetic = smartConvertEgyptianQaf(query.endsWith('ْ') ? query : `${query}ْ`);
+    if (smartPhonetic && !seenWords.has(smartPhonetic)) {
+      seenWords.add(smartPhonetic);
+      lexiconHits.push({
+        word: smartPhonetic,
+        type: 'phonetic_suno',
+        typeLabelAr: 'صوتي ذكي (أ/ئ/ء)',
+        typeLabelEn: 'Smart Phonetic Qaf',
+        meaning: 'نطق القاف العامي المصري الذكي باختيار (أ / ئ / ء) حسب الموضع والحركة',
+        source: 'Egyptian Qaf Phonology Engine',
+      });
+    }
+  }
+
   const morphologicalHints = buildMorphologicalHints(exactClean);
 
   const webFindingsBlock =
@@ -542,7 +559,7 @@ ${wiktionaryExtract ? `\nمرجع ويكاموس العربي:\n${wiktionaryExtr
   }
 المطلوب من الموديل الذكي التحقق وجلب **كل أنواع التشكيل الممكنة** لهذه الكلمة من المصادر التالية:
 1. التشكيل بالعامية المصرية المنطوقة (colloquial_egyptian): جميع المعاني والنطق الدارج في الشارع والأغاني (اسم، فعل، أمر، صفة) مع سكون أواخر العامية.
-2. التشكيل الصوتي لسونو (phonetic_suno): مع سكون إلزامي على آخر حرف وتحويل القاف إلى (ء / ئ) إذا وُجدت قاف.
+2. التشكيل الصوتي لسونو (phonetic_suno): مع سكون إلزامي على آخر حرف وتحويل القاف بذكاء إلى (أ أو ئ أو ء) حسب موضعها وحركتها في الكلمة.
 3. التشكيل للمذكر والمؤنث (gender_variant): إذا كانت تقبل التذكير والتأنيث (مثل كاف الخطاب ـَكْ / ـِكْ أو ضمير).
 4. التشكيل المعجمي الفصيح (classical_fusha): جميع الأوزان الصرفية الفصحى الممكنة (فَعَلَ، فُعِلَ، فَعْل، فِعْل، فُعْل...).
 

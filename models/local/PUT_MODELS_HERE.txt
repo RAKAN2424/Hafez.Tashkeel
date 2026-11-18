@@ -1,0 +1,12 @@
+Place each of your downloaded AI model folders directly inside this `models/local/` folder!
+On startup (and whenever you refresh), Hafiz Bel'Amya automatically scans this folder up to 5 levels deep and binds every model to its exact service slot:
+
+models/
+└── local/
+    ├── NAMAA-Space/Cohere-Speech-Tashkeel-2B/        -> Speech-to-Diacritized-Egyptian ASR
+    ├── models--mobiuslabsgmbh--faster-whisper-large-v3-turbo/ -> Fast Whisper ASR fallback
+    ├── Qwen3.5-9B-Q4_K_M-GGUF/                       -> Smart Studio + Rhymes + Web Agent + Diacritics Search + Prompt
+    ├── Nile-Chat-4B-GGUF/                            -> Alternative Egyptian Dialect LLM
+    ├── VoiceTut-Egyptian-Tashkeel-GGUF/              -> Optional Standalone Diacritics LLM
+    ├── OmniVoice/                                    -> TTS Reader + Zero-Shot Voice Cloning
+    └── VoiceTut-TTS-GGUF/                            -> Additional Voice / TTS GGUF (requires audio decoder)

@@ -1,0 +1,33 @@
+Hafiz Bel'Amya (حَافِظ بِالْعَامِّيَّة) — شجرة الموديلات القياسية بعد التسطيب
+================================================================================
+
+مجلد البرنامج الرئيسي/
+├── setup.exe                              <-- أيقونة التسطيب والتشغيل الوحيدة (تضغط عليها تبدأ وتفتح البرنامج)
+├── requirements.txt
+├── setup.py
+├── start_hafiz.bat
+└── models/
+    └── local/                             <-- الفولدر المخصص لكل موديلاتك (تضع كل موديل بفولدره هنا)
+        ├── NAMAA-Space/
+        │   └── Cohere-Speech-Tashkeel-2B/ <-- [السماع بالتشكيل ASR]
+        │       ├── config.json
+        │       └── model.safetensors
+        │
+        ├── models--mobiuslabsgmbh--faster-whisper-large-v3-turbo/  <-- [احتياطي السماع السريع ASR]
+        │   └── snapshots/<hash>/model.bin
+        │
+        ├── Qwen3.5-9B-Q4_K_M-GGUF/        <-- [الموديل الذكي + القوافي + الويب + هات تشكيل + البرومبتات]
+        │   └── Qwen3.5-9B-Q4_K_M.gguf
+        │
+        ├── Nile-Chat-4B-GGUF/             <-- [اختياري: موديل عامية مصرية للقوافي وإعادة الصياغة]
+        │   └── *.gguf
+        │
+        ├── VoiceTut-Egyptian-Tashkeel-GGUF/ <-- [اختياري: تشكيل نصي — ممنوع وضعه في خانة القراءة الصوتية]
+        │   └── *.gguf
+        │
+        ├── OmniVoice/                     <-- [استنساخ الأصوات + القراءة الصوتية TTS]
+        │   └── models/OmniVoice/
+        │       └── model.safetensors
+        │
+        └── VoiceTut-TTS-GGUF/             <-- [ملف صوتي إضافي في خانة القراءة]
+            └── *.gguf

@@ -184,7 +184,7 @@ def detect_model_kind(model_path_str: str, slot_id: str = "") -> Tuple[str, List
             return "torch_checkpoint", ["torch"]
         if name_lower.endswith(".safetensors") or name_lower.endswith(".bin"):
             if "omnivoice" in full_lower:
-                return "omnivoice", ["torch", "transformers", "soundfile"]
+                return "omnivoice", ["omnivoice", "torch", "transformers", "soundfile"]
             parent = p.parent
             if (parent / "config.json").exists():
                 return detect_model_kind(str(parent), slot_id)
@@ -196,7 +196,7 @@ def detect_model_kind(model_path_str: str, slot_id: str = "") -> Tuple[str, List
 
         # OmniVoice TTS & Zero-Shot Voice Cloning folder
         if "omnivoice" in full_lower and any(f.endswith((".safetensors", ".bin", ".pt")) for f in files_lower):
-            return "omnivoice", ["torch", "transformers", "soundfile"]
+            return "omnivoice", ["omnivoice", "torch", "transformers", "soundfile"]
 
         # CTranslate2 Whisper directory
         if "model.bin" in files_lower and (
@@ -524,12 +524,60 @@ def run_asr(model_path: Path, kind: str, payload: Dict[str, Any]) -> Dict[str, A
 
             gen_kwargs = {"language": "arabic"} if lang_code == "ar" else {}
             try:
-                res = asr_pipe(audio_input, generate_kwargs=gen_kwargs)
+                res = asr_pipe(audio_input, chunk_length_s=30, generate_kwargs=gen_kwargs)
             except Exception:
-                res = asr_pipe(audio_input)
-            return {"text": (res.get("text") or "").strip()}
+                try:
+                    res = asr_pipe(audio_input, generate_kwargs=gen_kwargs)
+                except Exception:
+                    res = asr_pipe(audio_input)
 
-    raise RuntimeError(f"Unsupported ASR model kind '{kind}'. Expected CTranslate2 Whisper folder, Whisper .pt, or HF ASR folder.")
+            if isinstance(res, str):
+                text_out = res.strip()
+            elif isinstance(res, list):
+                text_out = " ".join(
+                    (item.get("text") if isinstance(item, dict) else str(item or "")).strip()
+                    for item in res
+                ).strip()
+            elif isinstance(res, dict):
+                text_out = (res.get("text") or "").strip()
+            else:
+                text_out = str(res or "").strip()
+            return {"text": text_out}
+
+        if kind == "gguf":
+            model_dir = model_path.parent if model_path.is_file() else model_path
+            for script_name in ("transcribe.py", "infer.py", "predict.py"):
+                custom_script = model_dir / script_name
+                if custom_script.exists():
+                    proc = subprocess.run(
+                        [sys.executable, str(custom_script)],
+                        input=json.dumps({**payload, "audioFilePath": decoded_audio}, ensure_ascii=False),
+                        text=True,
+                        capture_output=True,
+                        timeout=180,
+                    )
+                    if proc.returncode == 0 and proc.stdout.strip():
+                        out_raw = proc.stdout.strip()
+                        try:
+                            return json.loads(out_raw)
+                        except Exception:
+                            return {"text": out_raw}
+                    raise RuntimeError(proc.stderr.strip() or f"{script_name} failed for {model_path.name}")
+            whisper_cli = shutil.which("whisper-cli") or shutil.which("whisper-cpp")
+            if whisper_cli:
+                gguf_file = resolve_gguf_file(model_path)
+                cmd = [whisper_cli, "-m", str(gguf_file), "-f", decoded_audio, "--no-timestamps"]
+                if lang_code:
+                    cmd.extend(["-l", lang_code])
+                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+                if proc.returncode == 0 and proc.stdout.strip():
+                    return {"text": proc.stdout.strip()}
+            raise RuntimeError(
+                f"ASR GGUF '{model_path.name}' needs a whisper.cpp / transcribe.py decoder. "
+                "For direct automatic Egyptian Speech-to-Diacritized-Text, select NAMAA-Space/Cohere-Speech-Tashkeel-2B or faster-whisper-large-v3-turbo in asr_diacritics."
+            )
+
+    raise RuntimeError(f"Unsupported ASR model kind '{kind}'. Expected Cohere-Speech-Tashkeel HF folder, CTranslate2 Whisper folder, or Whisper .pt.")
 
 
 def array_to_wav_base64(audio_array: Any, sampling_rate: int) -> str:
@@ -550,10 +598,99 @@ def array_to_wav_base64(audio_array: Any, sampling_rate: int) -> str:
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
+_DIACRITIC_RE = re.compile(r"[\u064B-\u065F\u0670\u0640]")
+
+
+def _smart_convert_qaf_word(raw_word: str) -> str:
+    if not raw_word or "ق" not in raw_word:
+        return raw_word
+    punct_set = set("،,.!?؟:؛\"'()[]{}«»")
+    lead = ""
+    trail = ""
+    w = raw_word
+    while w and w[0] in punct_set:
+        lead += w[0]
+        w = w[1:]
+    while w and w[-1] in punct_set:
+        trail = w[-1] + trail
+        w = w[:-1]
+    if "ق" not in w:
+        return raw_word
+
+    w = re.sub(r"^(و|ف|ب)?(ي|ت|ن)َقُ?و?ل(وا|ون|ه|ها|ك|ي|هم)?", lambda m: f"{m.group(1) or ''}{m.group(2)}ِئُوْ{'ل' + (m.group(3) or '')}", w)
+    w = re.sub(r"دَقِيق(ة|ه)?", lambda m: "دِئِيئ" + ("َه" if m.group(1) else ""), w)
+    w = re.sub(r"حَقِيق(ة|ه)?", lambda m: "حَئِيئ" + ("َه" if m.group(1) else ""), w)
+    w = re.sub(r"بَقِي([تتن]?)", r"بَئِي\1", w)
+    w = re.sub(r"لَقِي([تتن]?)", r"لِئِي\1", w)
+    w = re.sub(r"مَعْ?قُول", "مَعْءُول", w)
+    w = re.sub(r"مَخْ?لُوق(ة|ه)?", lambda m: "مَخْلُوءَه" if m.group(1) else "مَخْلُوء", w)
+    if "ق" not in w:
+        return lead + w + trail
+
+    tokens: List[List[str]] = []
+    for ch in w:
+        if _DIACRITIC_RE.match(ch):
+            if tokens:
+                tokens[-1][1] += ch
+        else:
+            tokens.append([ch, ""])
+
+    kasra, damma, sukoon, shadda = "\u0650", "\u064F", "\u0652", "\u0651"
+    for i, tok in enumerate(tokens):
+        if tok[0] != "ق":
+            continue
+        prev = tokens[i - 1] if i > 0 else None
+        prev2 = tokens[i - 2] if i > 1 else None
+        prev3 = tokens[i - 3] if i > 2 else None
+        nxt = tokens[i + 1] if i < len(tokens) - 1 else None
+
+        after_al = i == 2 and prev and prev[0] == "ل" and prev2 and prev2[0] in ("ا", "أ", "إ")
+        after_pal = i == 3 and prev and prev[0] == "ل" and prev2 and prev2[0] in ("ا", "أ", "إ") and prev3 and prev3[0] in ("و", "ف", "ب", "ك", "ل")
+        after_ll = i == 2 and prev and prev[0] == "ل" and prev2 and prev2[0] == "ل"
+        if i == 0 or after_al or after_pal or after_ll:
+            tok[0] = "أ"
+        elif i == len(tokens) - 1:
+            if shadda in tok[1] or (prev and prev[0] in ("ا", "و", "ي", "ى")) or (prev and sukoon in prev[1]) or (prev and damma in prev[1]):
+                tok[0] = "ء"
+            elif prev and kasra in prev[1]:
+                tok[0] = "ئ"
+            else:
+                tok[0] = "أ"
+        else:
+            if (
+                kasra in tok[1]
+                or (prev and kasra in prev[1])
+                or (prev and prev[0] in ("ي", "ى", "ئ"))
+                or (nxt and nxt[0] in ("ي", "ى", "ئ"))
+            ):
+                tok[0] = "ئ"
+            elif (prev and prev[0] == "ا") or (shadda in tok[1]) or (prev and prev[0] == "و") or (nxt and nxt[0] == "و") or (damma in tok[1]) or (prev and damma in prev[1]):
+                tok[0] = "ء"
+            else:
+                tok[0] = "أ"
+
+    return lead + "".join(b + m for b, m in tokens) + trail
+
+
+def smart_convert_egyptian_qaf(text: str) -> str:
+    if not text or "ق" not in text:
+        return text
+    out_lines = []
+    for line in text.splitlines():
+        st = line.strip()
+        if not st or st.startswith("[") or (st.startswith("*") and st.endswith("*")):
+            out_lines.append(line)
+            continue
+        out_lines.append(" ".join(_smart_convert_qaf_word(w) if "ق" in w else w for w in line.split(" ")))
+    return "\n".join(out_lines)
+
+
 def run_tts(model_path: Path, kind: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     text = (payload.get("text") or "").strip()
     if not text:
         raise RuntimeError("No text provided for TTS synthesis.")
+    if payload.get("language", "ar") == "ar" and payload.get("egyptianQafToHamza", True) is not False:
+        text = smart_convert_egyptian_qaf(text)
 
     if kind == "piper_onnx":
         if not has_pkg("piper"):
@@ -619,7 +756,50 @@ def run_tts(model_path: Path, kind: str, payload: Dict[str, Any]) -> Dict[str, A
             "fallbackToBrowserSpeech": False,
         }
 
-    raise RuntimeError(f"Unsupported TTS model kind '{kind}'. Expected Piper .onnx, HF TTS folder, or Coqui TTS folder.")
+    if kind == "omnivoice":
+        if not has_pkg("omnivoice"):
+            raise RuntimeError(
+                "OmniVoice model detected, but 'omnivoice' runtime is not installed. Run: pip install omnivoice"
+            )
+        from omnivoice import OmniVoice  # type: ignore
+
+        model_dir = model_path.parent if model_path.is_file() else model_path
+        ov = get_or_load_single_model(f"omnivoice:{model_dir}", lambda: OmniVoice.from_pretrained(str(model_dir)))
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_wav = os.path.join(tmpdir, "omnivoice_tts.wav")
+            audio_out = ov.generate(text=text)
+            if hasattr(audio_out, "save"):
+                audio_out.save(out_wav)
+                b64 = base64.b64encode(Path(out_wav).read_bytes()).decode("ascii")
+            else:
+                b64 = array_to_wav_base64(audio_out, 24000)
+        return {
+            "audioBase64": b64,
+            "mimeType": "audio/wav",
+            "textResult": text,
+            "fallbackToBrowserSpeech": False,
+        }
+
+    if kind == "gguf":
+        model_dir = model_path.parent if model_path.is_file() else model_path
+        for script_name in ("synthesize.py", "infer.py"):
+            custom_script = model_dir / script_name
+            if custom_script.exists():
+                proc = subprocess.run(
+                    [sys.executable, str(custom_script)],
+                    input=json.dumps(payload, ensure_ascii=False),
+                    text=True,
+                    capture_output=True,
+                    timeout=180,
+                )
+                if proc.returncode == 0 and proc.stdout.strip():
+                    return json.loads(proc.stdout.strip())
+                raise RuntimeError(proc.stderr.strip() or f"{script_name} failed for {model_path.name}")
+        raise RuntimeError(
+            f"TTS GGUF '{model_path.name}' requires an accompanying audio-codec decoder script (synthesize.py) or OmniVoice/Piper .onnx model in tts_reader."
+        )
+
+    raise RuntimeError(f"Unsupported TTS model kind '{kind}'. Expected OmniVoice, Piper .onnx, HF TTS folder, or Coqui TTS folder.")
 
 
 def run_voice_clone(model_path: Path, kind: str, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -772,6 +952,12 @@ def preload_model_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
             lambda: WhisperModel(str(model_path), device=device, compute_type=compute_type),
         )
         return {"preloaded": f"ct2_whisper:{model_path}"}
+
+    if kind == "omnivoice" and has_pkg("omnivoice"):
+        from omnivoice import OmniVoice  # type: ignore
+        model_dir = model_path.parent if model_path.is_file() else model_path
+        get_or_load_single_model(f"omnivoice:{model_dir}", lambda: OmniVoice.from_pretrained(str(model_dir)))
+        return {"preloaded": f"omnivoice:{model_dir}"}
 
     return {"preloaded": None}
 

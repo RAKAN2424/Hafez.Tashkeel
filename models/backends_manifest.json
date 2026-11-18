@@ -1,97 +1,180 @@
 {
-  "version": "1.4.0",
+  "version": "1.5.0",
   "appName": "Hafiz Bel'Amya (حَافِظ بِالْعَامِّيَّة)",
   "defaultSearchRoots": [
     "D:\\AI\\LMStudio-Models\\local",
     "E:\\OmniVoice"
   ],
+  "systemPrerequisites": [
+    {
+      "id": "python",
+      "name": "Python 3.11 (64-bit)",
+      "required": true,
+      "downloadUrl": "https://www.python.org/ftp/python/3.11.9/python-3.11.9-amd64.exe",
+      "infoUrl": "https://www.python.org/downloads/release/python-3119/",
+      "descAr": "البيئة الأساسية لتشغيل جميع محركات الموديلات المحلية (GGUF, HuggingFace, Whisper, OmniVoice)",
+      "descEn": "Core Python 3.11 runtime required for local GGUF, HuggingFace, Whisper, and OmniVoice inference"
+    },
+    {
+      "id": "ffmpeg",
+      "name": "FFmpeg Essentials",
+      "required": true,
+      "downloadUrl": "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip",
+      "infoUrl": "https://ffmpeg.org/download.html",
+      "descAr": "أداة تحويل صيغ الصوت من المايك واليوتيوب والاستنساخ الصوتي إلى WAV 16kHz/24kHz",
+      "descEn": "Decodes and converts microphone, YouTube, and cloned audio streams into WAV"
+    },
+    {
+      "id": "nodejs",
+      "name": "Node.js 20 LTS",
+      "required": true,
+      "downloadUrl": "https://nodejs.org/dist/v20.18.1/node-v20.18.1-x64.msi",
+      "infoUrl": "https://nodejs.org/en/download",
+      "descAr": "سيرفر الواجهة والـ API المحلي على بورت 3000",
+      "descEn": "Backend web server and local API runtime on port 3000"
+    },
+    {
+      "id": "cuda",
+      "name": "NVIDIA CUDA 12.4 Toolkit",
+      "required": false,
+      "downloadUrl": "https://developer.nvidia.com/cuda-downloads",
+      "infoUrl": "https://developer.nvidia.com/cuda-downloads",
+      "descAr": "لتسريع تشغيل الموديلات على كارت الشاشة NVIDIA VRAM بدلاً من المعالج",
+      "descEn": "Optional GPU driver/CUDA toolkit for hardware-accelerated VRAM inference"
+    }
+  ],
   "backends": [
     {
       "id": "llama_cpp",
       "pipName": "llama-cpp-python",
+      "pipInstallSpec": "llama-cpp-python>=0.3.2",
       "minVersion": "0.3.2",
       "category": "llm_gguf",
+      "downloadUrl": "https://abetlen.github.io/llama-cpp-python/whl/cu124",
+      "pypiUrl": "https://pypi.org/project/llama-cpp-python/#files",
       "requiredForAr": "تشغيل كل موديلات GGUF مباشرة على الكارت (Qwen3.5-9B, Nile-Chat-4B, VoiceTut-Egyptian-Tashkeel-GGUF, gpt-oss-20b, VoiceTut-TTS-GGUF)",
       "requiredForEn": "Runs all GGUF models directly on GPU/CPU (Qwen3.5-9B, Nile-Chat-4B, VoiceTut-GGUF, gpt-oss-20b)"
     },
     {
       "id": "torch",
       "pipName": "torch",
+      "pipInstallSpec": "torch>=2.3.0",
       "minVersion": "2.3.0",
       "category": "deep_learning",
+      "downloadUrl": "https://download.pytorch.org/whl/cu124",
+      "pypiUrl": "https://pypi.org/project/torch/#files",
       "requiredForAr": "المحرك الأساسي لكارت الشاشة NVIDIA CUDA وموديلات PyTorch و safetensors مثل OmniVoice و Cohere-Speech-Tashkeel-2B",
       "requiredForEn": "Core GPU CUDA & PyTorch tensor engine for OmniVoice, Cohere-Speech-Tashkeel-2B, and HF models"
     },
     {
       "id": "transformers",
       "pipName": "transformers",
+      "pipInstallSpec": "transformers>=4.46.0",
       "minVersion": "4.46.0",
       "category": "huggingface",
+      "downloadUrl": "https://pypi.org/project/transformers/#files",
+      "pypiUrl": "https://pypi.org/project/transformers/#files",
       "requiredForAr": "تشغيل مجلدات HuggingFace وموديلات الصوت والكتابة مثل NAMAA-Space/Cohere-Speech-Tashkeel-2B و OmniVoice و Qwen",
       "requiredForEn": "Loads HuggingFace architectures including Cohere-Speech-Tashkeel-2B, OmniVoice, Qwen & Gemma"
     },
     {
       "id": "accelerate",
       "pipName": "accelerate",
+      "pipInstallSpec": "accelerate>=0.34.0",
       "minVersion": "0.34.0",
       "category": "huggingface",
+      "downloadUrl": "https://pypi.org/project/accelerate/#files",
+      "pypiUrl": "https://pypi.org/project/accelerate/#files",
       "requiredForAr": "توزيع الذاكرة تلقائياً على كارت الشاشة (device_map='auto') لموديلات HuggingFace الكبيرة",
       "requiredForEn": "Automatic GPU device mapping for large HuggingFace directories"
     },
     {
       "id": "safetensors",
       "pipName": "safetensors",
+      "pipInstallSpec": "safetensors>=0.4.5",
       "minVersion": "0.4.5",
       "category": "weights",
+      "downloadUrl": "https://pypi.org/project/safetensors/#files",
+      "pypiUrl": "https://pypi.org/project/safetensors/#files",
       "requiredForAr": "قراءة أوزان .safetensors بأمان وسرعة مثل E:\\OmniVoice\\models\\OmniVoice\\model.safetensors",
       "requiredForEn": "Fast zero-copy loading for .safetensors weights such as OmniVoice"
     },
     {
       "id": "faster_whisper",
       "pipName": "faster-whisper",
+      "pipInstallSpec": "faster-whisper>=1.0.3",
       "minVersion": "1.0.3",
       "category": "asr",
+      "downloadUrl": "https://pypi.org/project/faster-whisper/#files",
+      "pypiUrl": "https://pypi.org/project/faster-whisper/#files",
       "requiredForAr": "تشغيل موديل faster-whisper-large-v3-turbo لتفريغ الصوت فائق السرعة",
       "requiredForEn": "High-speed CTranslate2 inference for faster-whisper-large-v3-turbo"
     },
     {
       "id": "soundfile",
       "pipName": "soundfile",
+      "pipInstallSpec": "soundfile>=0.12.1",
       "minVersion": "0.12.1",
       "category": "audio",
+      "downloadUrl": "https://pypi.org/project/soundfile/#files",
+      "pypiUrl": "https://pypi.org/project/soundfile/#files",
       "requiredForAr": "قراءة وحفظ ملفات WAV/Audio بدون مشاكل بين المايك وموديلات الصوت",
       "requiredForEn": "WAV/audio decoding and encoding across ASR, TTS, and Voice Clone"
     },
     {
       "id": "librosa",
       "pipName": "librosa",
+      "pipInstallSpec": "librosa>=0.10.2",
       "minVersion": "0.10.2",
       "category": "audio",
+      "downloadUrl": "https://pypi.org/project/librosa/#files",
+      "pypiUrl": "https://pypi.org/project/librosa/#files",
       "requiredForAr": "إعادة ضبط تردد الصوت (16kHz / 24kHz) تلقائياً قبل إدخاله لموديلات السمع واستنساخ الصوت",
       "requiredForEn": "Automatic audio resampling for speech & voice cloning models"
     },
     {
       "id": "piper",
       "pipName": "piper-tts",
+      "pipInstallSpec": "piper-tts>=1.2.0",
       "minVersion": "1.2.0",
       "category": "tts",
+      "downloadUrl": "https://pypi.org/project/piper-tts/#files",
+      "pypiUrl": "https://pypi.org/project/piper-tts/#files",
       "requiredForAr": "تشغيل موديلات القراءة السريعة بصيغة .onnx",
       "requiredForEn": "Runs lightweight Piper .onnx TTS voices"
     },
     {
       "id": "onnxruntime",
       "pipName": "onnxruntime",
+      "pipInstallSpec": "onnxruntime>=1.19.0",
       "minVersion": "1.19.0",
       "category": "tts",
+      "downloadUrl": "https://pypi.org/project/onnxruntime/#files",
+      "pypiUrl": "https://pypi.org/project/onnxruntime/#files",
       "requiredForAr": "محرك تشغيل ملفات ONNX الخاصة بالصوت والتعرف",
       "requiredForEn": "Runtime engine for .onnx speech and neural audio models"
     },
     {
+      "id": "omnivoice",
+      "pipName": "omnivoice",
+      "pipInstallSpec": "omnivoice",
+      "minVersion": "0.1.0",
+      "optional": true,
+      "category": "voice_clone",
+      "downloadUrl": "https://pypi.org/project/omnivoice/#files",
+      "pypiUrl": "https://pypi.org/project/omnivoice/#files",
+      "requiredForAr": "باك إند تشغيل موديل OmniVoice للاستنساخ الصوتي وقراءة النصوص",
+      "requiredForEn": "Runtime backend for OmniVoice cloning and neural TTS"
+    },
+    {
       "id": "TTS",
       "pipName": "TTS",
+      "pipInstallSpec": "TTS",
       "minVersion": "0.22.0",
       "optional": true,
       "category": "voice_clone",
+      "downloadUrl": "https://pypi.org/project/TTS/#files",
+      "pypiUrl": "https://pypi.org/project/TTS/#files",
       "requiredForAr": "تشغيل مجلدات Coqui XTTS-v2 للاستنساخ الصوتي (اختياري لبايثون 3.10-3.11)",
       "requiredForEn": "Coqui XTTS-v2 voice cloning backend (optional, Python 3.10-3.11)"
     }
@@ -107,21 +190,25 @@
         "faster-whisper-large-v3",
         "moss-transcribe"
       ],
-      "excludePatterns": ["egyptian-tashkeel"],
+      "excludePatterns": ["egyptian-tashkeel", "voicetut", "omnivoice", "tts-gguf"],
+      "downloadUrl": "https://huggingface.co/NAMAA-Space/Cohere-Speech-Tashkeel-2B",
+      "downloadLabel": "NAMAA-Space/Cohere-Speech-Tashkeel-2B",
       "adviceAr": "اختيارك لـ Cohere-Speech-Tashkeel-2B ممتاز جداً لأنه يسمع العامية العربية ويكتبها بالتشكيل مباشرة! والبديل الاحتياطي السريع عندك هو faster-whisper-large-v3-turbo أو cohere-transcribe-arabic.",
       "adviceEn": "Cohere-Speech-Tashkeel-2B is an ideal pick for Arabic Speech-to-Diacritized-Text, with faster-whisper-large-v3-turbo as fast fallback."
     },
     "tts_reader": {
       "preferredPatterns": [
-        "voicetut-tts",
         "omnivoice",
+        "voicetut-tts",
         "xtts",
         "piper",
         ".onnx"
       ],
       "excludePatterns": ["egyptian-tashkeel", "tashkeel-gguf"],
-      "adviceAr": "تعديل مهم: في الصور كنت مختار VoiceTut-Egyptian-Tashkeel-GGUF هنا وده موديل تشكيل نص مش صوت! الموديل الصح من جهازك للخانة دي هو VoiceTut-TTS-GGUF أو OmniVoice.",
-      "adviceEn": "Important fix: VoiceTut-Egyptian-Tashkeel-GGUF is a text diacritizer, not an audio TTS model. Use VoiceTut-TTS-GGUF or OmniVoice here."
+      "downloadUrl": "https://huggingface.co/models?search=OmniVoice",
+      "downloadLabel": "OmniVoice / VoiceTut-TTS-GGUF",
+      "adviceAr": "تعديل مهم: في الصور كنت مختار VoiceTut-Egyptian-Tashkeel-GGUF هنا وده موديل تشكيل نص مش صوت! الموديل الأفضل من جهازك للقراءة الصوتية هو OmniVoice (أو VoiceTut-TTS-GGUF مع ديكودر الصوت).",
+      "adviceEn": "Important fix: VoiceTut-Egyptian-Tashkeel-GGUF is a text diacritizer, not an audio TTS model. Use OmniVoice or VoiceTut-TTS-GGUF here."
     },
     "smart_studio": {
       "preferredPatterns": [
@@ -130,10 +217,18 @@
         "nile-chat-4b",
         "qwen2.5-7b",
         "gemma-4-e4b",
+        "qwen3.5-4b",
+        "qwen3-4b",
         "qwen3.8-27b",
-        "gpt-oss-20b"
+        "gpt-oss-20b",
+        "qwen2.5-coder-14b",
+        "qwen2.5-1.5b",
+        "llama-3.2-1b",
+        "qwen2.5-0.5b"
       ],
-      "excludePatterns": ["asr", "tts", "whisper", "omnivoice", "bge-small", "vl_7b"],
+      "excludePatterns": ["mmproj", "imatrix", "asr", "tts", "whisper", "omnivoice", "bge-small", "vl_7b", "ace-step", "yue2", "sheetsage", "diffusion", "controlnet", "clip_vision", "upscale", "vae", "loras", "style_models", "text_encoders", "audio_encoders", "embeddings", "unsloth-audiocpp-links", "xet"],
+      "downloadUrl": "https://huggingface.co/models?search=Qwen3.5-9B-GGUF",
+      "downloadLabel": "Qwen3.5-9B-Q4_K_M-GGUF",
       "adviceAr": "اختيارك لـ Qwen3.5-9B-Q4_K_M ممتاز ومتوازن جداً للسرعة وكارت الشاشة، وبيرث تلقائياً خانتي «هات تشكيل» و«البرومبتات» من غير إعادة تحميل الكارت.",
       "adviceEn": "Qwen3.5-9B-Q4_K_M gives the best speed/intelligence balance and is automatically shared with Diacritics Search & Prompt Generator."
     },
@@ -142,9 +237,15 @@
         "qwen3.5-9b",
         "nile-chat-4b",
         "qwen3-8b",
-        "qwen2.5-7b"
+        "qwen2.5-7b",
+        "gemma-4-e4b",
+        "qwen3.5-4b",
+        "qwen3-4b",
+        "llama-3.2-1b"
       ],
-      "excludePatterns": ["asr", "tts", "whisper", "omnivoice", "bge-small"],
+      "excludePatterns": ["mmproj", "imatrix", "asr", "tts", "whisper", "omnivoice", "bge-small", "vl_7b", "ace-step", "yue2", "sheetsage", "diffusion", "controlnet", "clip_vision", "upscale", "vae", "loras", "style_models", "text_encoders", "audio_encoders", "embeddings", "unsloth-audiocpp-links", "xet"],
+      "downloadUrl": "https://huggingface.co/models?search=Nile-Chat-4B-GGUF",
+      "downloadLabel": "Qwen3.5-9B-Q4_K_M / Nile-Chat-4B-GGUF",
       "adviceAr": "تركه على Qwen3.5-9B-Q4_K_M بيمنع تبديل الموديل على الكارت (صفر انتظار)، أو لو عاوز موديل عامية مصرية مخصص جرب Nile-Chat-4B-GGUF.",
       "adviceEn": "Keeping Qwen3.5-9B avoids VRAM reloads; alternatively Nile-Chat-4B-GGUF is an Egyptian dialect specialist."
     },
@@ -154,7 +255,9 @@
         "qwen3.5-9b",
         "nile-chat-4b"
       ],
-      "excludePatterns": ["tts", "asr", "whisper", "omnivoice"],
+      "excludePatterns": ["mmproj", "imatrix", "tts", "asr", "whisper", "omnivoice", "ace-step", "yue2", "sheetsage", "xet"],
+      "downloadUrl": "https://huggingface.co/models?search=VoiceTut-Egyptian-Tashkeel",
+      "downloadLabel": "Smart Studio / VoiceTut-Egyptian-Tashkeel-GGUF",
       "adviceAr": "الأفضل تركه تلقائياً ← الموديل الذكي (للبحث في المعاجم على النت أولاً)، أو ربطه بـ VoiceTut-Egyptian-Tashkeel-GGUF لو عاوز موديل تشكيل عامي منفصل.",
       "adviceEn": "Leave Auto-inherited from Smart Model for online dictionary verification, or assign VoiceTut-Egyptian-Tashkeel-GGUF."
     },
@@ -162,9 +265,12 @@
       "preferredPatterns": [
         "qwen3.5-9b",
         "yue2-3b",
-        "qwen3-8b"
+        "qwen3-8b",
+        "gemma-4-e4b"
       ],
-      "excludePatterns": ["tts", "asr", "whisper", "omnivoice"],
+      "excludePatterns": ["mmproj", "imatrix", "tts", "asr", "whisper", "omnivoice", "bge-small", "xet"],
+      "downloadUrl": "https://huggingface.co/models?search=Qwen3.5-9B-GGUF",
+      "downloadLabel": "Smart Studio / Qwen3.5-9B-Q4_K_M",
       "adviceAr": "الأفضل تركه تلقائياً ← الموديل الذكي عشان يبحث على الإنترنت عن أحدث إصدارات Suno ثم يكتب البرومبت بنفس الموديل بدون تفريغ الكارت.",
       "adviceEn": "Leave Auto-inherited from Smart Model so online Suno research and prompt writing share the same loaded model."
     },
@@ -173,9 +279,14 @@
         "qwen3.5-9b",
         "qwen3-8b",
         "qwen2.5-7b",
-        "gemma-4-e4b"
+        "gemma-4-e4b",
+        "qwen3.5-4b",
+        "nile-chat-4b",
+        "qwen3-4b"
       ],
-      "excludePatterns": ["tts", "asr", "whisper", "omnivoice"],
+      "excludePatterns": ["mmproj", "imatrix", "tts", "asr", "whisper", "omnivoice", "bge-small", "vl_7b", "ace-step", "yue2", "sheetsage", "diffusion", "controlnet", "clip_vision", "upscale", "vae", "loras", "style_models", "text_encoders", "audio_encoders", "embeddings", "unsloth-audiocpp-links", "xet"],
+      "downloadUrl": "https://huggingface.co/models?search=Qwen3.5-9B-GGUF",
+      "downloadLabel": "Qwen3.5-9B-Q4_K_M-GGUF",
       "adviceAr": "ممتاز على Qwen3.5-9B-Q4_K_M لقراءة صفحات الأغاني المستخرجة باللغة العربية والإنجليزية بسرعة.",
       "adviceEn": "Qwen3.5-9B-Q4_K_M handles scraped web lyrics and Arabic/English summarization cleanly."
     },
@@ -188,7 +299,9 @@
         "seed-vc"
       ],
       "excludePatterns": ["egyptian-tashkeel", "qwen3.5", "whisper"],
-      "adviceAr": "ممتاز اختيار OmniVoice (E:\\OmniVoice\\models\\OmniVoice\\model.safetensors) — تم إصلاح مشكلة علامات التنصيص \"\" في المسار ودعم تحميل مجلدات OmniVoice.",
+      "downloadUrl": "https://huggingface.co/models?search=OmniVoice",
+      "downloadLabel": "OmniVoice (model.safetensors)",
+      "adviceAr": "ممتاز اختيار OmniVoice (E:\\OmniVoice\\models\\OmniVoice\\model.safetensors أو داخل مجلد models) — تم إصلاح مشكلة علامات التنصيص \"\" في المسار ودعم تحميل مجلدات OmniVoice.",
       "adviceEn": "OmniVoice is properly matched for Voice Clone; surrounding quotes in pasted Windows paths are now cleaned automatically."
     }
   }
