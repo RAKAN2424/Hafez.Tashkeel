@@ -6,20 +6,26 @@ import path from 'path';
 import ytdl from '@distube/ytdl-core';
 import 'dotenv/config';
 
+import fs from 'fs';
 import {
   applyLocalLlmPreset,
+  autoAssignModels,
   discoverLocalLlms,
   dispatchModelTask,
   extractJsonFromText,
   getAllModelsStatus,
+  getBackendsManifest,
   getLocalModelsRoot,
   getMachineEnvironment,
+  getSearchRoots,
   getVramStatus,
+  installPythonBackends,
   loadModelRegistry,
   refreshGpuVram,
   resolveModelSlotStatus,
   runModelPipeline,
   setLocalModelsRoot,
+  setSearchRoots,
   testModelSlotConnection,
   unloadAllModels,
   updateModelSlotConfig,
@@ -27,7 +33,10 @@ import {
   type ModelSlotId,
   type ProviderType,
 } from './models/runner.ts';
-import { runDiacriticsSearchScript } from './models/scripts/diacritics_search.ts';
+import {
+  runDiacriticsSearchScript,
+  verifyTextWordsViaWebLexicon,
+} from './models/scripts/diacritics_search.ts';
 import { runSunoResearchScript } from './models/scripts/suno_research_agent.ts';
 import { fetchWebsiteContent, searchWebForLyrics } from './models/scripts/web_scraper_agent.ts';
 import {
@@ -282,6 +291,93 @@ async function startServer() {
     }
   });
 
+  // 1a-2. Update & Rescan Fixed Model Search Roots
+  app.post('/api/models/search-roots', (req, res) => {
+    try {
+      const { searchRoots = [] } = req.body;
+      if (!Array.isArray(searchRoots)) {
+        return res.status(400).json({ error: 'searchRoots array is required' });
+      }
+      const result = setSearchRoots(searchRoots.map((s: any) => String(s)));
+      res.json(result);
+    } catch (error: any) {
+      res.status(400).json({ error: error.message || 'Failed to update searchRoots' });
+    }
+  });
+
+  // 1a-3. Auto-Search & Auto-Assign Best Local Models for Each Slot
+  app.post('/api/models/auto-assign', (req, res) => {
+    try {
+      const overwriteExisting = Boolean(req.body?.overwriteExisting);
+      const fixMismatches = req.body?.fixMismatches !== false;
+      const result = autoAssignModels({ overwriteExisting, fixMismatches });
+      res.json({
+        ...result,
+        machine: getMachineEnvironment(),
+        searchRoots: getSearchRoots(),
+      });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message || 'Failed to auto-assign models' });
+    }
+  });
+
+  // 1s-1. First-Launch Setup, Dependencies Readiness & Manifest Status
+  app.get('/api/setup/status', (_req, res) => {
+    try {
+      const machine = getMachineEnvironment();
+      const manifest = getBackendsManifest();
+      const models = getAllModelsStatus();
+      const searchRoots = getSearchRoots();
+      const coreRequiredIds = (manifest.backends || [])
+        .filter((b: any) => !b.optional)
+        .map((b: any) => b.id);
+      const missingCorePackages = coreRequiredIds.filter(
+        (id: string) => !machine.pythonPackages?.[id]
+      );
+      res.json({
+        machine,
+        manifest,
+        models,
+        searchRoots,
+        missingCorePackages,
+      });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message || 'Failed to read setup status' });
+    }
+  });
+
+  // 1s-2. Install Missing Python ML Backends via pip
+  app.post('/api/setup/install-python', async (req, res) => {
+    try {
+      const packages = Array.isArray(req.body?.packages)
+        ? req.body.packages.map((p: any) => String(p).trim()).filter(Boolean)
+        : undefined;
+      const result = await installPythonBackends(packages);
+      res.json(result);
+    } catch (error: any) {
+      res.status(500).json({ ok: false, error: error.message || 'Failed to run pip install' });
+    }
+  });
+
+  // 1s-3. Download Requirements, Setup, Launcher & Manifest Files
+  app.get('/api/setup/download/:filename', (req, res) => {
+    const allowed: Record<string, string> = {
+      'requirements.txt': path.join(process.cwd(), 'requirements.txt'),
+      'setup.py': path.join(process.cwd(), 'setup.py'),
+      'install_backends.bat': path.join(process.cwd(), 'install_backends.bat'),
+      'install_backends.sh': path.join(process.cwd(), 'install_backends.sh'),
+      'start_hafiz.bat': path.join(process.cwd(), 'start_hafiz.bat'),
+      'start_hafiz.sh': path.join(process.cwd(), 'start_hafiz.sh'),
+      'backends_manifest.json': path.join(process.cwd(), 'models', 'backends_manifest.json'),
+    };
+    const fileKey = req.params.filename;
+    const targetPath = allowed[fileKey];
+    if (!targetPath || !fs.existsSync(targetPath)) {
+      return res.status(404).json({ error: 'Setup file not found' });
+    }
+    res.download(targetPath, fileKey);
+  });
+
   // 1b. Discover Real Local LLM Servers Running on This Machine (Ollama / LM Studio / llama.cpp / vLLM)
   app.get('/api/models/discover-local', async (req, res) => {
     try {
@@ -491,6 +587,13 @@ async function startServer() {
         return res.status(400).json({ error: 'text is required' });
       }
 
+      const registry = loadModelRegistry();
+      const smartInternetEnabled = registry.smart_studio?.internetAccess !== false;
+      const lexiconVerification = await verifyTextWordsViaWebLexicon(String(text), {
+        enableWebSearch: smartInternetEnabled,
+        maxWords: 4,
+      });
+
       const genderInstruction =
         genderPreference === 'feminine'
           ? 'السياق موجه للمؤنث حتماً: كاف الخطاب مكسورة ومسكونة (ـِكْ مثل: يِهْدِيْكِ، قَلْبِكْ، شُفْتِكْ، مَعَاكِ)، وضمير المخاطب (إِنْتِ).'
@@ -506,7 +609,7 @@ async function startServer() {
 1. سكون إلزامي صريح على آخر كل كلمة (ْ).
 2. استبدال حرف القاف (ق) تماماً بهمزات صوتية (ء أو ئـ/ئ).
 3. التشكيل الصوتي التام وكسر همزة الوصل صراحة.
-${PHONETIC_ENCODING_RULES}
+${PHONETIC_ENCODING_RULES}${lexiconVerification.webVerificationDirective}
 أخرج النص المشفر فقط بدون أي مقدمات.`;
         promptText = `شكّل هذا النص بالتشفير الصوتي الأصلي (سكون آخر كل كلمة وهمزة القاف): "${text}"`;
       } else if (mode === 'connected') {
@@ -514,14 +617,14 @@ ${PHONETIC_ENCODING_RULES}
 1. سكون صريح (ْ) في آخر كل كلمة بلا استثناء (100%).
 2. ممنوع إعراب الفصحى على أواخر الكلمات.
 3. حرف القاف (ق) يظل حرف قاف (ق) كما هو ولا يُحوّل إلى همزة.
-4. التفرقة الذكية بين المذكر والمؤنث: ${genderInstruction}
+4. التفرقة الذكية بين المذكر والمؤنث: ${genderInstruction}${lexiconVerification.webVerificationDirective}
 أخرج النص المشكل فقط بدون أي شروحات.`;
         promptText = `شكّل بالعامية المصرية مع سكون آخر كل كلمة وحفظ القاف: "${text}"`;
       } else if (mode === 'clean_standard') {
         sysPrompt = `أنت خبير التدقيق والتصحيح اللغوي للعامية المصرية.
 1. تصحيح الكلمات وتنسيقها بالعامية المصرية السليمة بدون أخطاء إملائية شائعة.
 2. مسح وإزالة أي تشكيل أو حركات نهائياً (نص نظيف تماماً خالٍ 100% من أي حركة).
-3. لا تغير الكلمات إلى فصحى متكلفة.
+3. لا تغير الكلمات إلى فصحى متكلفة.${lexiconVerification.webVerificationDirective}
 أخرج النص المصحح النظيف فقط بدون أي مقدمات.`;
         promptText = `صحح الكلمات بالعامية وامسح أي تشكيل بالكامل: "${text}"`;
       } else {
@@ -530,14 +633,21 @@ ${PHONETIC_ENCODING_RULES}
 2. [التشكيل الصوتي الغنائي الكامل لكل كلمة]: ضبط الحركات (فتحة، ضمة، كسرة، شدة، سكون) بدقة لوزن القراءة والغناء.
 3. [التفرقة بين المذكر والمؤنث]: ${genderInstruction}
 4. [حرف القاف ق يظل قاف ق أصيلاً 100% ولا يُمس].
-5. [ممنوع إعراب الفصحى على الأواخر].
+5. [ممنوع إعراب الفصحى على الأواخر].${lexiconVerification.webVerificationDirective}
 أخرج النص المشكل فقط بدون أي مقدمات أو شروحات.`;
         promptText = `شكّل هذا النص بالتشكيل الذكي الغنائي (سكون آخر كل كلمة وبقاء القاف ق وتفرقة المذكر/المؤنث): "${text}"`;
       }
 
       const { result, engine } = await dispatchModelTask({
         slotId: 'smart_studio',
-        payload: { task: `diacritics_${mode}`, text, genderPreference, language },
+        payload: {
+          task: `diacritics_${mode}`,
+          text,
+          genderPreference,
+          language,
+          enableWebSearch: smartInternetEnabled,
+          webResearchContext: lexiconVerification,
+        },
         llmPrompt: {
           systemPrompt: sysPrompt,
           userPrompt: promptText,
@@ -546,7 +656,19 @@ ${PHONETIC_ENCODING_RULES}
         },
         fallback: async () => {
           const ai = getAiClient();
-          const rawText = await generateWithFallback(ai, promptText, { systemInstruction: sysPrompt });
+          let rawText = '';
+          if (smartInternetEnabled) {
+            try {
+              rawText = await generateWithFallback(ai, promptText, {
+                systemInstruction: sysPrompt,
+                tools: [{ googleSearch: {} }],
+              });
+            } catch {
+              rawText = await generateWithFallback(ai, promptText, { systemInstruction: sysPrompt });
+            }
+          } else {
+            rawText = await generateWithFallback(ai, promptText, { systemInstruction: sysPrompt });
+          }
           return { text: (rawText || '').trim() };
         },
       });
@@ -564,22 +686,35 @@ ${PHONETIC_ENCODING_RULES}
         }
       }
 
-      res.json({ text: processed, engine });
+      res.json({
+        text: processed,
+        engine,
+        internetConnected: lexiconVerification.internetConnected,
+        sourcesChecked: lexiconVerification.sourcesChecked,
+      });
     } catch (error: any) {
       console.error('Error in /api/models/diacritics:', error);
       res.status(500).json({ error: error.message || 'Error processing diacritics' });
     }
   });
 
-  // 5. Diacritics Search Script + Search Model (Full Local LLM Support)
+  // 5. Diacritics Search Script + Unified Smart Model ("هات تشكيل")
   app.post('/api/models/diacritics-search', async (req, res) => {
     try {
-      const { word, language = 'ar' } = req.body;
+      const { word, language = 'ar', enableWebSearch } = req.body;
       if (!word || !String(word).trim()) {
         return res.status(400).json({ error: 'word is required' });
       }
 
-      const scriptContext = await runDiacriticsSearchScript(String(word));
+      const registry = loadModelRegistry();
+      const smartInternet = registry.smart_studio?.internetAccess !== false;
+      const searchSlotInternet = registry.diacritics_search?.internetAccess !== false;
+      const shouldUseWeb =
+        typeof enableWebSearch === 'boolean' ? enableWebSearch : smartInternet && searchSlotInternet;
+
+      const scriptContext = await runDiacriticsSearchScript(String(word), {
+        enableWebSearch: shouldUseWeb,
+      });
       const sysPrompt = `أنت باحث لغوي متخصص في جمع جميع أنواع التشكيل الممكنة للكلمات بالعامية المصرية والعربية الفصحى والتشفير الصوتي.
 ${scriptContext.searchDirectivePrompt}`;
       const userPrompt =
@@ -589,7 +724,12 @@ ${scriptContext.searchDirectivePrompt}`;
 
       const { result, engine } = await dispatchModelTask({
         slotId: 'diacritics_search',
-        payload: { word: scriptContext.normalizedQuery, language, scriptContext },
+        payload: {
+          word: scriptContext.normalizedQuery,
+          language,
+          enableWebSearch: shouldUseWeb,
+          scriptContext,
+        },
         llmPrompt: {
           systemPrompt: sysPrompt,
           userPrompt,
@@ -598,10 +738,26 @@ ${scriptContext.searchDirectivePrompt}`;
         },
         fallback: async () => {
           const ai = getAiClient();
-          const rawJson = await generateWithFallback(ai, userPrompt, {
-            systemInstruction: sysPrompt,
-            responseMimeType: 'application/json',
-          });
+          let rawJson = '';
+          if (shouldUseWeb) {
+            try {
+              rawJson = await generateWithFallback(ai, userPrompt, {
+                systemInstruction: sysPrompt,
+                responseMimeType: 'application/json',
+                tools: [{ googleSearch: {} }],
+              });
+            } catch {
+              rawJson = await generateWithFallback(ai, userPrompt, {
+                systemInstruction: sysPrompt,
+                responseMimeType: 'application/json',
+              });
+            }
+          } else {
+            rawJson = await generateWithFallback(ai, userPrompt, {
+              systemInstruction: sysPrompt,
+              responseMimeType: 'application/json',
+            });
+          }
           return extractJsonFromText(rawJson);
         },
       });
@@ -621,12 +777,17 @@ ${scriptContext.searchDirectivePrompt}`;
         }
       }
 
+      const mergedSources = Array.from(
+        new Set([...(scriptContext.sourcesChecked || []), ...(Array.isArray(parsed.sourcesChecked) ? parsed.sourcesChecked : [])])
+      );
+
       res.json({
         suggestions: mergedSuggestions,
         synonyms: parsed.synonyms || [],
         antonyms: parsed.antonyms || [],
-        sourcesChecked: parsed.sourcesChecked || scriptContext.sourcesChecked,
+        sourcesChecked: mergedSources,
         morphologicalHints: parsed.morphologicalHints || scriptContext.morphologicalHints,
+        internetConnected: scriptContext.internetConnected || shouldUseWeb,
         engine,
       });
     } catch (error: any) {
@@ -737,18 +898,25 @@ ${PHONETIC_ENCODING_RULES}`;
       }
 
       const registry = loadModelRegistry();
-      const slotInternetEnabled = registry.prompt_generator?.internetAccess !== false;
+      const smartInternet = registry.smart_studio?.internetAccess !== false;
+      const promptInternet = registry.prompt_generator?.internetAccess !== false;
+      const slotInternetEnabled = smartInternet && promptInternet;
       const shouldUseWeb = typeof enableWebSearch === 'boolean' ? enableWebSearch : slotInternetEnabled;
 
-      const sunoResearch = await runSunoResearchScript({
-        enableWebSearch: shouldUseWeb,
-        genre,
-        mood,
-      });
+      const [sunoResearch, lyricsVerification] = await Promise.all([
+        runSunoResearchScript({
+          enableWebSearch: shouldUseWeb,
+          genre,
+          mood,
+        }),
+        shouldUseWeb && lyrics.trim()
+          ? verifyTextWordsViaWebLexicon(lyrics, { enableWebSearch: true, maxWords: 3 })
+          : Promise.resolve(null),
+      ]);
 
       const sysPrompt = `أنت خبير هندسة البرومبتات (Prompt Engineering) لأدوات توليد الموسيقى بالذكاء الاصطناعي مثل Suno AI و Udio.
 ${sunoResearch.sunoPromptDirective}
-
+${lyricsVerification?.webVerificationDirective || ''}
 المعطيات المطلوبة:
 النوع الموسيقي: ${genre}
 الحالة: ${mood}
@@ -763,7 +931,7 @@ ${lyrics.trim() ? `كلمات الأغنية:\n${lyrics.trim()}` : ''}
 أخرج البرومبت الإنجليزي الجاهز للنسخ في Suno، وأضف شرحاً مختصراً بالعربية يوضح أحدث إصدار وميزات Suno التي تم الاستناد إليها.`;
 
       const promptMsg = shouldUseWeb
-        ? `استناداً لبيانات Suno المرفقة، اكتب برومبت Suno احترافي لنوع ${genre} وحالة ${mood}.`
+        ? `استناداً لبيانات الإنترنت الحية والمراجع المرفقة، اكتب برومبت Suno احترافي لنوع ${genre} وحالة ${mood}.`
         : `اكتب برومبت Suno احترافي لنوع ${genre} وحالة ${mood}.`;
 
       const { result, engine } = await dispatchModelTask({
@@ -774,6 +942,7 @@ ${lyrics.trim() ? `كلمات الأغنية:\n${lyrics.trim()}` : ''}
           lyrics,
           enableWebSearch: shouldUseWeb,
           sunoResearchContext: sunoResearch,
+          webResearchContext: lyricsVerification,
           language,
         },
         llmPrompt: {
@@ -802,11 +971,14 @@ ${lyrics.trim() ? `كلمات الأغنية:\n${lyrics.trim()}` : ''}
       });
 
       const finalText = typeof result === 'string' ? result : result?.text || '';
+      const mergedSources = Array.from(
+        new Set([...sunoResearch.sourcesChecked, ...(lyricsVerification?.sourcesChecked || [])])
+      );
       res.json({
         text: finalText,
         engine,
         internetConnected: sunoResearch.internetConnected,
-        sourcesChecked: sunoResearch.sourcesChecked,
+        sourcesChecked: mergedSources,
         liveSnippets: sunoResearch.liveSnippets,
       });
     } catch (error: any) {
@@ -815,7 +987,7 @@ ${lyrics.trim() ? `كلمات الأغنية:\n${lyrics.trim()}` : ''}
     }
   });
 
-  // 9. Smart Studio Lyrics & Composition Tasks (Full Local LLM Support)
+  // 9. Smart Studio Lyrics & Composition Tasks (Pre-flight Web Lexicon + Suno Search + Local LLM)
   app.post('/api/models/lyrics', async (req, res) => {
     try {
       const {
@@ -833,17 +1005,21 @@ ${lyrics.trim() ? `كلمات الأغنية:\n${lyrics.trim()}` : ''}
       const registry = loadModelRegistry();
       const slotInternetEnabled = registry.smart_studio?.internetAccess !== false;
       const shouldUseWeb =
-        task === 'compose_song' &&
-        (typeof enableWebSearch === 'boolean' ? enableWebSearch : slotInternetEnabled);
+        typeof enableWebSearch === 'boolean' ? enableWebSearch : slotInternetEnabled;
 
-      const sunoResearch =
-        task === 'compose_song'
-          ? await runSunoResearchScript({ enableWebSearch: shouldUseWeb, genre: genreTitle || genre })
-          : null;
+      const [sunoResearch, lexiconVerification] = await Promise.all([
+        task === 'compose_song' || task === 'analyze_lyrics'
+          ? runSunoResearchScript({ enableWebSearch: shouldUseWeb, genre: genreTitle || genre })
+          : Promise.resolve(null),
+        shouldUseWeb
+          ? verifyTextWordsViaWebLexicon(String(text), { enableWebSearch: true, maxWords: 4 })
+          : Promise.resolve(null),
+      ]);
 
       let sysPrompt = '';
       let promptText = '';
       let applyPhonetic = false;
+      const webDir = lexiconVerification?.webVerificationDirective || '';
 
       if (task === 'write_lyrics') {
         applyPhonetic = true;
@@ -851,7 +1027,7 @@ ${lyrics.trim() ? `كلمات الأغنية:\n${lyrics.trim()}` : ''}
 1. استخدم العامية المصرية 100% بطريقة طبيعية.
 2. ألف كلمات أصلية من الصفر وقسمها: [Intro], [Verse], [Chorus], [Outro].
 3. قوافٍ قوية ومترابطة، بدون مقدمات أو شروحات.
-${PHONETIC_ENCODING_RULES}`;
+${PHONETIC_ENCODING_RULES}${webDir}`;
         promptText = `ألف كلمات أغنية مصرية عن:\n"${text}"`;
       } else if (task === 'compose_song') {
         applyPhonetic = true;
@@ -859,7 +1035,7 @@ ${PHONETIC_ENCODING_RULES}`;
 [Vocal Delivery: Authentic Egyptian Street Accent, Expressive Melodic Delivery, High Energy]
 [Pronunciation: Colloquial Egyptian Phonetics & Syllables]`;
         sysPrompt = `أنت 'حَافِظ'، مؤلف الأغاني المصرية وخبير التشفير الصوتي لـ Suno AI.
-${sunoResearch ? `${sunoResearch.sunoPromptDirective}\n` : ''}
+${sunoResearch ? `${sunoResearch.sunoPromptDirective}\n` : ''}${webDir}
 ضع أكواد الميتا الإنجليزية في البداية:
 ${metaTags}
 قسم الأغنية إلى: [Intro], [Verse 1], [Chorus], [Verse 2], [Chorus], [Outro].
@@ -870,10 +1046,11 @@ ${PHONETIC_ENCODING_RULES}
       } else if (task === 'format_lyrics') {
         sysPrompt = `أنت شاعر ومنسق أغاني محترف.
 قسّم ونسّق الكلمات لتكون جاهزة للهندسة الصوتية باستخدام: [Intro], [Verse 1], [Pre-Chorus], [Chorus], [Verse 2], [Chorus 2], [Bridge], [Outro].
-حافظ على الكلمات الأصلية وقسمها بشكل موزون.`;
+حافظ على الكلمات الأصلية وقسمها بشكل موزون.${webDir}`;
         promptText = text;
       } else {
         sysPrompt = `أنت منتج فني (A&R) متخصص في الموسيقى المصرية الحديثة.
+${sunoResearch ? `${sunoResearch.sunoPromptDirective}\n` : ''}${webDir}
 1. حلل مود الكلمات.
 2. اقترح 3 أنواع موسيقية مصرية تليق بها.
 3. اكتب برومبت Suno AI إنجليزي احترافي يجمع بين الروح المصرية والتقنيات العالمية.`;
@@ -889,6 +1066,7 @@ ${PHONETIC_ENCODING_RULES}
           genreTitle,
           enableWebSearch: shouldUseWeb,
           sunoResearchContext: sunoResearch,
+          webResearchContext: lexiconVerification,
           language,
         },
         llmPrompt: {
@@ -921,11 +1099,17 @@ ${PHONETIC_ENCODING_RULES}
         finalText = ensureEgyptianPhoneticRules(finalText);
       }
 
+      const mergedSources = Array.from(
+        new Set([...(sunoResearch?.sourcesChecked || []), ...(lexiconVerification?.sourcesChecked || [])])
+      );
+
       res.json({
         text: finalText,
         engine,
-        internetConnected: sunoResearch?.internetConnected ?? false,
-        sourcesChecked: sunoResearch?.sourcesChecked ?? [],
+        internetConnected: Boolean(
+          sunoResearch?.internetConnected || lexiconVerification?.internetConnected || shouldUseWeb
+        ),
+        sourcesChecked: mergedSources,
       });
     } catch (error: any) {
       console.error('Error in /api/models/lyrics:', error);
@@ -1257,7 +1441,13 @@ ${taskInstruction}
 
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        watch: {
+          // Ignore models/registry.json & dropped weights so saving a model never reloads the page
+          ignored: ['**/models/**'],
+        },
+      },
       appType: 'spa',
     });
     app.use(vite.middlewares);
@@ -1267,6 +1457,17 @@ ${taskInstruction}
     app.get('*', (_req, res) => {
       res.sendFile(path.join(distPath, 'index.html'));
     });
+  }
+
+  try {
+    const startupScan = autoAssignModels({ overwriteExisting: false, fixMismatches: true });
+    if (startupScan.assigned.length > 0) {
+      console.log(
+        `[Hafiz Auto-Models] Bound ${startupScan.assigned.length} local model(s) from fixed directories.`
+      );
+    }
+  } catch {
+    // Non-fatal if fixed model drives are unmounted
   }
 
   const server = app.listen(PORT, '0.0.0.0', () => {

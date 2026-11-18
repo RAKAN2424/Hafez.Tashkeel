@@ -47,7 +47,7 @@ import { useVirtualizer } from '@tanstack/react-virtual';
 
 import { translations } from './translations';
 
-type ActiveTab = 'studio' | 'audio' | 'models';
+type ActiveTab = 'setup' | 'studio' | 'audio' | 'models';
 type ToolSubTab = 'rhymes' | 'rewrite';
 type WebAgentTask = 'extract_lyrics' | 'diacritize_smart' | 'phonetic_suno' | 'analyze_and_prompt' | 'custom';
 type ProviderType =
@@ -108,6 +108,9 @@ interface ModelSlotInfo {
   helperScript?: string;
   supportsInternet?: boolean;
   internetAccess?: boolean;
+  inheritedFrom?: string | null;
+  effectiveModelPath?: string;
+  effectiveModelLabel?: string;
 }
 
 interface MachineEnvironment {
@@ -120,8 +123,11 @@ interface MachineEnvironment {
   pythonBin: string;
   pythonAvailable: boolean;
   pythonVersion: string | null;
+  pipAvailable?: boolean;
+  ffmpegAvailable?: boolean;
   pythonPackages?: Record<string, boolean>;
   localModelsRoot?: string;
+  searchRoots?: string[];
   geminiKeyConfigured: boolean;
 }
 
@@ -180,7 +186,18 @@ interface VramStatusInfo {
 const BRAND_IMAGE_URL = 'https://i.ibb.co/ZRDHCGHz/Untitled-1080-x-1080-px.jpg';
 
 const App = () => {
-  const [activeTab, setActiveTab] = useState<ActiveTab>('studio');
+  const [activeTab, setActiveTab] = useState<ActiveTab>(() => {
+    if (typeof window !== 'undefined') {
+      const saved = sessionStorage.getItem('hafiz_active_tab');
+      if (saved === 'setup' || saved === 'studio' || saved === 'audio' || saved === 'models') {
+        return saved;
+      }
+      if (!localStorage.getItem('hafiz_setup_done')) {
+        return 'setup';
+      }
+    }
+    return 'studio';
+  });
   const [toolSubTab, setToolSubTab] = useState<ToolSubTab>('rhymes');
 
   const [inputText, setInputText] = useState('');
@@ -269,6 +286,16 @@ const App = () => {
   const [isRefreshingGpu, setIsRefreshingGpu] = useState(false);
   const [isUpdatingVramPolicy, setIsUpdatingVramPolicy] = useState(false);
 
+  // First-Run Setup, Manifest & Auto-Assign state
+  const [setupManifest, setSetupManifest] = useState<any>(null);
+  const [missingCorePackages, setMissingCorePackages] = useState<string[]>([]);
+  const [searchRootsDraft, setSearchRootsDraft] = useState('');
+  const [isSavingRoots, setIsSavingRoots] = useState(false);
+  const [isAutoAssigning, setIsAutoAssigning] = useState(false);
+  const [autoAssignNotice, setAutoAssignNotice] = useState<string | null>(null);
+  const [isInstallingPip, setIsInstallingPip] = useState(false);
+  const [pipInstallLog, setPipInstallLog] = useState<{ ok: boolean; command: string; log: string } | null>(null);
+
   // UI & Theme state
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -308,6 +335,12 @@ const App = () => {
     document.documentElement.setAttribute('data-theme', darkMode ? 'dark' : 'light');
     document.documentElement.classList.toggle('dark', darkMode);
   }, [darkMode]);
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      sessionStorage.setItem('hafiz_active_tab', activeTab);
+    }
+  }, [activeTab]);
 
   useEffect(() => {
     document.documentElement.setAttribute('lang', language);
@@ -361,6 +394,25 @@ const App = () => {
     setSelectedPathDrafts(pathDrafts);
   };
 
+  const fetchSetupStatus = async () => {
+    try {
+      const res = await fetch('/api/setup/status');
+      const data = await res.json();
+      if (res.ok) {
+        if (data.manifest) setSetupManifest(data.manifest);
+        if (Array.isArray(data.missingCorePackages)) setMissingCorePackages(data.missingCorePackages);
+        if (Array.isArray(data.searchRoots)) setSearchRootsDraft(data.searchRoots.join('\n'));
+        if (data.machine) setMachineEnv(data.machine);
+        if (Array.isArray(data.models)) {
+          setModelSlots(data.models);
+          syncSlotDrafts(data.models);
+        }
+      }
+    } catch {
+      // ignore initial background setup fetch error
+    }
+  };
+
   const fetchModelsStatus = async () => {
     setIsLoadingModels(true);
     try {
@@ -375,15 +427,126 @@ const App = () => {
         if (typeof data.localModelsRoot === 'string') {
           setLocalModelsRootInput(data.localModelsRoot);
         }
+        if (Array.isArray(data.machine.searchRoots)) {
+          setSearchRootsDraft(data.machine.searchRoots.join('\n'));
+        }
       }
       if (res.ok && data.vramStatus) {
         setVramStatus(data.vramStatus);
       }
+      await fetchSetupStatus();
     } catch {
       // ignore initial background fetch errors
     } finally {
       setIsLoadingModels(false);
     }
+  };
+
+  const handleSaveSearchRoots = async () => {
+    setIsSavingRoots(true);
+    setError(null);
+    try {
+      const roots = searchRootsDraft
+        .split(/\r?\n/)
+        .map((r) => r.trim())
+        .filter(Boolean);
+      const res = await fetch('/api/models/search-roots', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ searchRoots: roots }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to save search folders');
+      if (Array.isArray(data.models)) {
+        setModelSlots(data.models);
+        syncSlotDrafts(data.models);
+      }
+      if (data.machine) setMachineEnv(data.machine);
+      if (Array.isArray(data.searchRoots)) setSearchRootsDraft(data.searchRoots.join('\n'));
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setIsSavingRoots(false);
+    }
+  };
+
+  const handleAutoAssignModels = async (overwriteExisting = true) => {
+    setIsAutoAssigning(true);
+    setError(null);
+    setAutoAssignNotice(null);
+    try {
+      const roots = searchRootsDraft
+        .split(/\r?\n/)
+        .map((r) => r.trim())
+        .filter(Boolean);
+      if (roots.length > 0) {
+        await fetch('/api/models/search-roots', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ searchRoots: roots }),
+        });
+      }
+      const res = await fetch('/api/models/auto-assign', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ overwriteExisting, fixMismatches: true }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Auto-assign failed');
+      if (Array.isArray(data.models)) {
+        setModelSlots(data.models);
+        syncSlotDrafts(data.models);
+      }
+      if (data.machine) setMachineEnv(data.machine);
+      const assignedList = Array.isArray(data.assigned) ? data.assigned : [];
+      if (assignedList.length > 0) {
+        setAutoAssignNotice(
+          `${t.setupAssignedMsg} ${assignedList.map((a: any) => `${a.slotId} → ${a.modelName}`).join(' · ')}`
+        );
+      } else {
+        setAutoAssignNotice(
+          language === 'ar'
+            ? `تم فحص المسارات المحددة (عدد المكتشف: ${data.discoveredCount ?? 0}). تأكد أن المجلدات موجودة على هذا الجهاز.`
+            : `Scanned configured roots (${data.discoveredCount ?? 0} models found). Ensure folders exist on this machine.`
+        );
+      }
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setIsAutoAssigning(false);
+    }
+  };
+
+  const handleInstallPythonBackends = async () => {
+    setIsInstallingPip(true);
+    setError(null);
+    setPipInstallLog(null);
+    try {
+      const res = await fetch('/api/setup/install-python', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      const data = await res.json();
+      setPipInstallLog({
+        ok: Boolean(data.ok),
+        command: data.command || 'pip install -r requirements.txt',
+        log: [data.stdout, data.stderr, data.error].filter(Boolean).join('\n').trim() || (data.ok ? 'OK' : 'Failed'),
+      });
+      if (data.machine) setMachineEnv(data.machine);
+      await fetchSetupStatus();
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setIsInstallingPip(false);
+    }
+  };
+
+  const handleEnterStudioFromSetup = () => {
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('hafiz_setup_done', '1');
+    }
+    setActiveTab('studio');
   };
 
   const fetchVramStatus = async () => {
@@ -490,6 +653,21 @@ const App = () => {
     }
   };
 
+  const refreshSlotsMetadataOnly = async () => {
+    try {
+      const res = await fetch('/api/models/status');
+      const data = await res.json();
+      if (res.ok && Array.isArray(data.models)) {
+        setModelSlots(data.models);
+      }
+      if (res.ok && data.vramStatus) {
+        setVramStatus(data.vramStatus);
+      }
+    } catch {
+      // ignore silent refresh error
+    }
+  };
+
   const handleSelectSlotModel = async (slotId: string, selectedModelPath: string) => {
     setSelectedPathDrafts((prev) => ({ ...prev, [slotId]: selectedModelPath }));
     const nextProvider: ProviderType = selectedModelPath
@@ -514,6 +692,9 @@ const App = () => {
       if (!res.ok) throw new Error(data.error || 'Failed to select model');
       if (data.model) {
         setModelSlots((prev) => prev.map((m) => (m.id === slotId ? data.model : m)));
+        if (slotId === 'smart_studio') {
+          await refreshSlotsMetadataOnly();
+        }
       }
     } catch (err: any) {
       setError(err.message);
@@ -585,6 +766,9 @@ const App = () => {
       if (!res.ok) throw new Error(data.error || 'Failed to update internet access');
       if (data.model) {
         setModelSlots((prev) => prev.map((m) => (m.id === slotId ? data.model : m)));
+        if (slotId === 'smart_studio') {
+          await refreshSlotsMetadataOnly();
+        }
       }
     } catch (err: any) {
       setError(err.message);
@@ -606,6 +790,9 @@ const App = () => {
       if (!res.ok) throw new Error(data.error || 'Failed to update strict local setting');
       if (data.model) {
         setModelSlots((prev) => prev.map((m) => (m.id === slotId ? data.model : m)));
+        if (slotId === 'smart_studio') {
+          await refreshSlotsMetadataOnly();
+        }
       }
     } catch (err: any) {
       setError(err.message);
@@ -631,6 +818,9 @@ const App = () => {
       if (!res.ok) throw new Error(data.error || 'Failed to update model config');
       if (data.model) {
         setModelSlots((prev) => prev.map((m) => (m.id === slotId ? data.model : m)));
+        if (slotId === 'smart_studio') {
+          await refreshSlotsMetadataOnly();
+        }
       }
     } catch (err: any) {
       setError(err.message);
@@ -961,6 +1151,8 @@ const App = () => {
 
       setOutputResult(data.text);
       setLastEngineUsed(data.engine || '');
+      setLastInternetUsed(Boolean(data.internetConnected));
+      setLastSourcesChecked(Array.isArray(data.sourcesChecked) ? data.sourcesChecked : []);
       addToHistory(nextOutputType, inputText, data.text);
       if (autoRead) {
         speakText(data.text, true);
@@ -1707,7 +1899,11 @@ const App = () => {
     const diskModels = slot.availableLocalModels || [];
     const currentValue = slot.selectedModelPath || '';
     const externalLabel =
-      !currentValue && slot.activeAdapter !== 'fallback_ai'
+      !currentValue && slot.inheritedFrom === 'smart_studio'
+        ? `${t.inheritedFromSmartStudio}${
+            slot.effectiveModelLabel ? ` (${slot.effectiveModelLabel})` : ''
+          }`
+        : !currentValue && slot.activeAdapter !== 'fallback_ai'
         ? `${slot.activeAdapter}${slot.modelName ? `: ${slot.modelName}` : ''}`
         : t.defaultBuiltInFallback;
 
@@ -1808,6 +2004,19 @@ const App = () => {
             >
               {t.navModels}
             </button>
+            <button
+              onClick={() => {
+                setActiveTab('setup');
+                fetchSetupStatus();
+              }}
+              className={`py-5 text-sm font-semibold border-b-2 transition-colors whitespace-nowrap shrink-0 ${
+                activeTab === 'setup'
+                  ? 'border-indigo-600 text-indigo-600 dark:text-indigo-400 dark:border-indigo-400'
+                  : 'border-transparent text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
+              }`}
+            >
+              {t.navSetup}
+            </button>
           </nav>
 
           {/* Zone 3: Language & Theme Controls */}
@@ -1832,12 +2041,13 @@ const App = () => {
 
         {/* Mobile Tab Switcher */}
         <div className="flex md:hidden border-t border-slate-200 dark:border-slate-800 px-4 gap-2 overflow-x-auto">
-          {(['studio', 'audio', 'models'] as ActiveTab[]).map((tab) => (
+          {(['studio', 'audio', 'models', 'setup'] as ActiveTab[]).map((tab) => (
             <button
               key={tab}
               onClick={() => {
                 setActiveTab(tab);
                 if (tab === 'models') fetchModelsStatus();
+                if (tab === 'setup') fetchSetupStatus();
               }}
               className={`py-2.5 px-3 text-xs font-semibold border-b-2 whitespace-nowrap shrink-0 ${
                 activeTab === tab
@@ -1845,7 +2055,13 @@ const App = () => {
                   : 'border-transparent text-slate-500'
               }`}
             >
-              {tab === 'studio' ? t.navStudio : tab === 'audio' ? t.navAudio : t.navModels}
+              {tab === 'studio'
+                ? t.navStudio
+                : tab === 'audio'
+                ? t.navAudio
+                : tab === 'models'
+                ? t.navModels
+                : t.navSetup}
             </button>
           ))}
         </div>
@@ -2768,15 +2984,32 @@ const App = () => {
                   </p>
                 </div>
 
-                <button
-                  onClick={fetchModelsStatus}
-                  disabled={isLoadingModels}
-                  className="h-10 px-4 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 text-xs font-semibold flex items-center gap-2 transition-colors whitespace-nowrap shrink-0"
-                >
-                  <RefreshCw size={14} className={isLoadingModels ? 'animate-spin' : ''} />
-                  <span>{t.refreshModels}</span>
-                </button>
+                <div className="flex flex-wrap items-center gap-2 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => handleAutoAssignModels(true)}
+                    disabled={isAutoAssigning}
+                    className="h-10 px-4 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold flex items-center gap-2 transition-colors disabled:opacity-40 whitespace-nowrap"
+                  >
+                    <Zap size={14} />
+                    <span>{isAutoAssigning ? t.autoAssignRunning : t.autoAssignBtn}</span>
+                  </button>
+                  <button
+                    onClick={fetchModelsStatus}
+                    disabled={isLoadingModels}
+                    className="h-10 px-4 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 text-xs font-semibold flex items-center gap-2 transition-colors whitespace-nowrap"
+                  >
+                    <RefreshCw size={14} className={isLoadingModels ? 'animate-spin' : ''} />
+                    <span>{t.refreshModels}</span>
+                  </button>
+                </div>
               </div>
+
+              {autoAssignNotice && (
+                <div className="p-3 rounded-xl border border-emerald-200 dark:border-emerald-800 bg-emerald-50/70 dark:bg-emerald-950/30 text-xs text-emerald-700 dark:text-emerald-300 font-medium">
+                  {autoAssignNotice}
+                </div>
+              )}
 
               {/* Local Models Folder Root Path Input + Scan */}
               <div className="flex flex-wrap items-center gap-2.5">
@@ -3317,7 +3550,13 @@ const App = () => {
                             disabled={savingSlotId === slot.id}
                             className="w-full h-10 ps-3 pe-8 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-[#13161C] text-xs font-semibold text-slate-900 dark:text-slate-100 appearance-none cursor-pointer"
                           >
-                            <option value="">{t.defaultBuiltInFallback}</option>
+                            <option value="">
+                              {slot.inheritedFrom === 'smart_studio'
+                                ? `${t.inheritedFromSmartStudio}${
+                                    slot.effectiveModelLabel ? ` (${slot.effectiveModelLabel})` : ''
+                                  }`
+                                : t.defaultBuiltInFallback}
+                            </option>
                             {diskModels.map((m) => (
                               <option key={m.path} value={m.path}>
                                 {m.name} · {m.kind.toUpperCase()} · {m.sizeLabel} ({m.source === 'slot_folder' ? slot.folder : m.relativePath})
@@ -3463,6 +3702,279 @@ const App = () => {
                 })}
               </div>
             </section>
+          </div>
+        )}
+
+        {/* =================================================================== */}
+        {/* TAB 4: FIRST-RUN SETUP, INSTALLER & MODEL PLACEMENT AUDIT           */}
+        {/* =================================================================== */}
+        {activeTab === 'setup' && (
+          <div className="max-w-6xl mx-auto space-y-6">
+            {/* Top Setup Header Bar */}
+            <section className="bg-white dark:bg-[#13161C] border border-slate-200 dark:border-slate-800 rounded-2xl p-6 shadow-sm flex flex-wrap items-center justify-between gap-4">
+              <div className="max-w-2xl">
+                <h1 className="text-lg font-bold text-slate-900 dark:text-white flex items-center gap-2">
+                  <Download size={20} className="text-indigo-600 dark:text-indigo-400 shrink-0" />
+                  <span>{t.setupTitle}</span>
+                </h1>
+                <p className="text-xs text-slate-500 dark:text-slate-400 mt-1.5 leading-relaxed">
+                  {t.setupSubtitle}
+                </p>
+              </div>
+              <div className="flex flex-wrap items-center gap-2.5 shrink-0">
+                <button
+                  type="button"
+                  onClick={handleInstallPythonBackends}
+                  disabled={isInstallingPip || !machineEnv?.pythonAvailable}
+                  className="h-10 px-4 rounded-xl border border-indigo-200 dark:border-indigo-800 bg-indigo-50 dark:bg-indigo-950/40 text-indigo-700 dark:text-indigo-300 hover:bg-indigo-100 dark:hover:bg-indigo-900/60 text-xs font-semibold flex items-center gap-2 transition-colors disabled:opacity-40 whitespace-nowrap"
+                >
+                  <RefreshCw size={14} className={isInstallingPip ? 'animate-spin' : ''} />
+                  <span>{isInstallingPip ? t.setupRunningPip : t.setupRunPipBtn}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={handleEnterStudioFromSetup}
+                  className="h-10 px-5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs sm:text-sm font-semibold flex items-center gap-2 transition-colors whitespace-nowrap"
+                >
+                  <CheckCircle2 size={15} />
+                  <span>{t.setupSkipToStudio}</span>
+                </button>
+              </div>
+            </section>
+
+            {pipInstallLog && (
+              <section className="bg-white dark:bg-[#13161C] border border-slate-200 dark:border-slate-800 rounded-2xl p-5 shadow-sm space-y-2">
+                <div className="flex items-center justify-between gap-3 text-xs font-mono" dir="ltr">
+                  <span className={pipInstallLog.ok ? 'text-emerald-600 dark:text-emerald-400 font-semibold' : 'text-red-600 dark:text-red-400 font-semibold'}>
+                    {pipInstallLog.ok ? 'pip install succeeded' : 'pip install finished with warnings/errors'}
+                  </span>
+                  <span className="text-slate-500 dark:text-slate-400 truncate">{pipInstallLog.command}</span>
+                </div>
+                <pre
+                  dir="ltr"
+                  className="max-h-48 overflow-y-auto p-3 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#0B0D11] text-[11px] font-mono text-slate-700 dark:text-slate-300 whitespace-pre-wrap"
+                >
+                  {pipInstallLog.log}
+                </pre>
+              </section>
+            )}
+
+            {/* Section 1: Direct Downloads & One-Click Launcher Files */}
+            <section className="bg-white dark:bg-[#13161C] border border-slate-200 dark:border-slate-800 rounded-2xl p-6 shadow-sm space-y-4">
+              <div>
+                <h2 className="text-base font-bold text-slate-900 dark:text-white">
+                  {t.setupDownloadFilesTitle}
+                </h2>
+                <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">{t.setupDownloadFilesDesc}</p>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3" dir="ltr">
+                {[
+                  {
+                    file: 'requirements.txt',
+                    label: 'requirements.txt',
+                    descAr: 'كل مكتبات Python المطلوبة للـ GGUF و HF و ASR و TTS',
+                    descEn: 'All Python ML dependencies',
+                  },
+                  {
+                    file: 'setup.py',
+                    label: 'setup.py',
+                    descAr: 'ملف حزمة التثبيت (pip install -e .)',
+                    descEn: 'Python package installer',
+                  },
+                  {
+                    file: 'install_backends.bat',
+                    label: 'install_backends.bat',
+                    descAr: 'مثبّت ويندوز بضغطة واحدة مع دعم CUDA لكارت NVIDIA',
+                    descEn: 'Windows 1-click CUDA installer',
+                  },
+                  {
+                    file: 'start_hafiz.bat',
+                    label: 'start_hafiz.bat',
+                    descAr: 'ملف التشغيل: تضغط عليه يشغّل السيرفر ويفتح المتصفح',
+                    descEn: 'Windows double-click app launcher',
+                  },
+                  {
+                    file: 'backends_manifest.json',
+                    label: 'models/backends_manifest.json',
+                    descAr: 'ملف الداتا للمكتبات ومسارات الموديلات وتوصيات التوزيع',
+                    descEn: 'Backends & auto-assign data manifest',
+                  },
+                  {
+                    file: 'install_backends.sh',
+                    label: 'install_backends.sh',
+                    descAr: 'مثبّت Linux / macOS',
+                    descEn: 'Linux / macOS installer',
+                  },
+                  {
+                    file: 'start_hafiz.sh',
+                    label: 'start_hafiz.sh',
+                    descAr: 'ملف تشغيل Linux / macOS',
+                    descEn: 'Linux / macOS launcher',
+                  },
+                ].map((item) => (
+                  <a
+                    key={item.file}
+                    href={`/api/setup/download/${encodeURIComponent(item.file)}`}
+                    download={item.file}
+                    className="p-3.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#0B0D11] hover:border-indigo-500/70 transition-colors flex flex-col justify-between gap-2"
+                  >
+                    <div>
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-xs font-mono font-bold text-slate-900 dark:text-slate-100 truncate">
+                          {item.label}
+                        </span>
+                        <Download size={14} className="text-indigo-600 dark:text-indigo-400 shrink-0" />
+                      </div>
+                      <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1" dir={language === 'ar' ? 'rtl' : 'ltr'}>
+                        {language === 'ar' ? item.descAr : item.descEn}
+                      </p>
+                    </div>
+                  </a>
+                ))}
+              </div>
+            </section>
+
+            {/* Section 2: Fixed Model Paths & Auto-Assign Control */}
+            <section className="bg-white dark:bg-[#13161C] border border-slate-200 dark:border-slate-800 rounded-2xl p-6 shadow-sm space-y-4">
+              <div className="flex flex-wrap items-start justify-between gap-4">
+                <div>
+                  <h2 className="text-base font-bold text-slate-900 dark:text-white flex items-center gap-2">
+                    <FolderOpen size={18} className="text-indigo-600 dark:text-indigo-400 shrink-0" />
+                    <span>{t.setupSearchRootsTitle}</span>
+                  </h2>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={handleSaveSearchRoots}
+                    disabled={isSavingRoots}
+                    className="h-9 px-3.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 text-xs font-semibold transition-colors disabled:opacity-40 whitespace-nowrap"
+                  >
+                    {t.setupSaveRootsBtn}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleAutoAssignModels(true)}
+                    disabled={isAutoAssigning}
+                    className="h-9 px-4 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold flex items-center gap-1.5 transition-colors disabled:opacity-40 whitespace-nowrap"
+                  >
+                    <Zap size={14} />
+                    <span>{isAutoAssigning ? t.autoAssignRunning : t.setupApplyAuditBtn}</span>
+                  </button>
+                </div>
+              </div>
+
+              <textarea
+                value={searchRootsDraft}
+                onChange={(e) => setSearchRootsDraft(e.target.value)}
+                rows={3}
+                dir="ltr"
+                placeholder={'D:\\AI\\LMStudio-Models\\local\nE:\\OmniVoice'}
+                className="w-full p-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#0B0D11] text-xs font-mono text-slate-800 dark:text-slate-200 focus:border-indigo-500"
+              />
+
+              {autoAssignNotice && (
+                <div className="p-3 rounded-xl border border-emerald-200 dark:border-emerald-800 bg-emerald-50/70 dark:bg-emerald-950/30 text-xs text-emerald-700 dark:text-emerald-300 font-medium">
+                  {autoAssignNotice}
+                </div>
+              )}
+            </section>
+
+            {/* Section 3: Model Placement Audit Table (From Your Disk & Screenshots) */}
+            {setupManifest?.slotRecommendations && (
+              <section className="bg-white dark:bg-[#13161C] border border-slate-200 dark:border-slate-800 rounded-2xl overflow-hidden shadow-sm">
+                <div className="px-6 py-4 border-b border-slate-200 dark:border-slate-800">
+                  <h2 className="text-base font-bold text-slate-900 dark:text-white">
+                    {t.setupAuditTitle}
+                  </h2>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-xs text-start">
+                    <thead className="bg-slate-50 dark:bg-[#0E1015] border-b border-slate-200 dark:border-slate-800 text-slate-500 dark:text-slate-400">
+                      <tr>
+                        <th className="py-3 px-4 font-semibold text-start">{t.setupSlotCol}</th>
+                        <th className="py-3 px-4 font-semibold text-start">{t.activeModelLabel}</th>
+                        <th className="py-3 px-4 font-semibold text-start">{t.setupAdviceCol}</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-200 dark:divide-slate-800">
+                      {modelSlots.map((slot) => {
+                        const rec = setupManifest.slotRecommendations[slot.id];
+                        return (
+                          <tr key={slot.id} className="hover:bg-slate-50/70 dark:hover:bg-[#0E1015]/60">
+                            <td className="py-3 px-4 font-semibold text-slate-900 dark:text-slate-100 whitespace-nowrap">
+                              {language === 'ar' ? slot.nameAr : slot.nameEn}
+                            </td>
+                            <td className="py-3 px-4 font-mono text-slate-700 dark:text-slate-300 max-w-[220px] truncate" dir="ltr">
+                              {slot.effectiveModelLabel || slot.activeAdapter}
+                            </td>
+                            <td className="py-3 px-4 text-slate-600 dark:text-slate-300 leading-relaxed">
+                              {rec ? (language === 'ar' ? rec.adviceAr : rec.adviceEn) : '—'}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+            )}
+
+            {/* Section 4: Python Libraries Readiness Matrix */}
+            {setupManifest?.backends && (
+              <section className="bg-white dark:bg-[#13161C] border border-slate-200 dark:border-slate-800 rounded-2xl overflow-hidden shadow-sm">
+                <div className="px-6 py-4 border-b border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-between gap-3">
+                  <h2 className="text-base font-bold text-slate-900 dark:text-white">
+                    {t.setupMatrixTitle}
+                  </h2>
+                  {machineEnv && (
+                    <span className="text-xs font-mono text-slate-500 dark:text-slate-400 tabular-nums" dir="ltr">
+                      {machineEnv.pythonAvailable ? machineEnv.pythonVersion : 'Python Missing'} · Missing core: {missingCorePackages.length}
+                    </span>
+                  )}
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-xs text-start">
+                    <thead className="bg-slate-50 dark:bg-[#0E1015] border-b border-slate-200 dark:border-slate-800 text-slate-500 dark:text-slate-400">
+                      <tr>
+                        <th className="py-3 px-4 font-semibold text-start">{t.setupPkgCol}</th>
+                        <th className="py-3 px-4 font-semibold text-start">{t.setupStatusCol}</th>
+                        <th className="py-3 px-4 font-semibold text-start">{t.setupPurposeCol}</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-200 dark:divide-slate-800">
+                      {setupManifest.backends.map((b: any) => {
+                        const installed = Boolean(machineEnv?.pythonPackages?.[b.id]);
+                        return (
+                          <tr key={b.id} className="hover:bg-slate-50/70 dark:hover:bg-[#0E1015]/60">
+                            <td className="py-3 px-4 font-mono font-semibold text-slate-900 dark:text-slate-100 whitespace-nowrap" dir="ltr">
+                              {b.pipName} &gt;= {b.minVersion}
+                            </td>
+                            <td className="py-3 px-4 whitespace-nowrap">
+                              <span
+                                className={`font-semibold ${
+                                  installed
+                                    ? 'text-emerald-600 dark:text-emerald-400'
+                                    : b.optional
+                                    ? 'text-slate-500 dark:text-slate-400'
+                                    : 'text-amber-600 dark:text-amber-400'
+                                }`}
+                              >
+                                {installed ? t.setupInstalled : t.setupMissing}
+                              </span>
+                            </td>
+                            <td className="py-3 px-4 text-slate-600 dark:text-slate-300 leading-relaxed">
+                              {language === 'ar' ? b.requiredForAr : b.requiredForEn}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+            )}
           </div>
         )}
       </main>

@@ -1,7 +1,11 @@
 {
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "Hafiz Bel'Amya Direct Local Disk Models & Pluggable Backend Registry.",
-  "localModelsRoot": "",
+  "localModelsRoot": "D:\\AI\\LMStudio-Models\\local",
+  "searchRoots": [
+    "D:\\AI\\LMStudio-Models\\local",
+    "E:\\OmniVoice"
+  ],
   "vramPolicy": {
     "singleModelOnly": true,
     "restorePreviousModel": true,

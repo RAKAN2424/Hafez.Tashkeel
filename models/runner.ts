@@ -100,6 +100,9 @@ export interface ModelSlotStatus {
   helperScript?: string;
   supportsInternet: boolean;
   internetAccess: boolean;
+  inheritedFrom?: ModelSlotId | null;
+  effectiveModelPath?: string;
+  effectiveModelLabel?: string;
   readyForCustomModel: boolean;
 }
 
@@ -113,8 +116,11 @@ export interface MachineEnvironment {
   pythonBin: string;
   pythonAvailable: boolean;
   pythonVersion: string | null;
+  pipAvailable: boolean;
+  ffmpegAvailable: boolean;
   pythonPackages: Record<string, boolean>;
   localModelsRoot: string;
+  searchRoots: string[];
   geminiKeyConfigured: boolean;
 }
 
@@ -199,14 +205,55 @@ const DEFAULT_VRAM_POLICY: VramPolicyConfig = {
   unloadOnExit: true,
 };
 
+function sanitizePathInput(p: string): string {
+  let s = (p || '').trim();
+  if (s.length >= 2 && ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'")))) {
+    s = s.slice(1, -1).trim();
+  }
+  return s;
+}
+
+export function resolvePythonExecutable(): string {
+  const winVenv = path.join(process.cwd(), '.venv', 'Scripts', 'python.exe');
+  if (fs.existsSync(winVenv)) return winVenv;
+  const unixVenv = path.join(process.cwd(), '.venv', 'bin', 'python');
+  if (fs.existsSync(unixVenv)) return unixVenv;
+  if (process.env.PYTHON_BIN && process.env.PYTHON_BIN.trim()) {
+    return process.env.PYTHON_BIN.trim();
+  }
+  return process.platform === 'win32' ? 'python' : 'python3';
+}
+
 function getRegistryPath(): string {
   return path.join(process.cwd(), 'models', 'registry.json');
+}
+
+function getManifestPath(): string {
+  return path.join(process.cwd(), 'models', 'backends_manifest.json');
+}
+
+export function getBackendsManifest(): any {
+  try {
+    const mp = getManifestPath();
+    if (fs.existsSync(mp)) {
+      return JSON.parse(fs.readFileSync(mp, 'utf-8'));
+    }
+  } catch {
+    // ignore
+  }
+  return {
+    version: '1.4.0',
+    defaultSearchRoots: ['D:\\AI\\LMStudio-Models\\local', 'E:\\OmniVoice'],
+    backends: [],
+    slotRecommendations: {},
+  };
 }
 
 function readRegistryFile(): {
   version?: string;
   description?: string;
   localModelsRoot?: string;
+  searchRoots?: string[];
   vramPolicy?: Partial<VramPolicyConfig>;
   models: Record<ModelSlotId, ModelRegistryEntry>;
 } {
@@ -295,7 +342,72 @@ export function updateVramPolicy(updates: Partial<VramPolicyConfig>): VramPolicy
 
 export function getLocalModelsRoot(): string {
   const parsed = readRegistryFile();
-  return (parsed.localModelsRoot || '').trim();
+  return sanitizePathInput(parsed.localModelsRoot || '');
+}
+
+export function getSearchRoots(): string[] {
+  const parsed = readRegistryFile();
+  const manifest = getBackendsManifest();
+  const roots = new Set<string>();
+  const primary = sanitizePathInput(parsed.localModelsRoot || '');
+  if (primary) roots.add(primary);
+  const configured = Array.isArray(parsed.searchRoots)
+    ? parsed.searchRoots
+    : Array.isArray(manifest.defaultSearchRoots)
+    ? manifest.defaultSearchRoots
+    : [];
+  for (const r of configured) {
+    const clean = sanitizePathInput(String(r || ''));
+    if (clean) roots.add(clean);
+  }
+  return Array.from(roots);
+}
+
+export function setSearchRoots(roots: string[]): {
+  searchRoots: string[];
+  catalog: LocalDiskModel[];
+  models: ModelSlotStatus[];
+  machine: MachineEnvironment;
+} {
+  const cleaned = Array.from(
+    new Set(
+      roots
+        .map((r) => sanitizePathInput(String(r || '')))
+        .filter(Boolean)
+    )
+  );
+  const regPath = getRegistryPath();
+  const parsed = readRegistryFile();
+  parsed.searchRoots = cleaned;
+  if (cleaned.length > 0 && !sanitizePathInput(parsed.localModelsRoot || '')) {
+    parsed.localModelsRoot = cleaned[0];
+  }
+  fs.writeFileSync(regPath, JSON.stringify(parsed, null, 2) + '\n', 'utf-8');
+  const catalog = collectAllRootModels(cleaned);
+  return {
+    searchRoots: cleaned,
+    catalog,
+    models: getAllModelsStatus(),
+    machine: getMachineEnvironment(),
+  };
+}
+
+function collectAllRootModels(roots: string[]): LocalDiskModel[] {
+  const seen = new Set<string>();
+  const all: LocalDiskModel[] = [];
+  for (const r of roots) {
+    const clean = sanitizePathInput(r);
+    if (!clean) continue;
+    const resolved = path.isAbsolute(clean) ? clean : path.resolve(process.cwd(), clean);
+    if (!fs.existsSync(resolved)) continue;
+    for (const m of scanDirectoryForModels(resolved, 'models_root', 4)) {
+      if (!seen.has(m.path)) {
+        seen.add(m.path);
+        all.push(m);
+      }
+    }
+  }
+  return all;
 }
 
 export function loadModelRegistry(): Record<ModelSlotId, ModelRegistryEntry> {
@@ -304,11 +416,12 @@ export function loadModelRegistry(): Record<ModelSlotId, ModelRegistryEntry> {
 
 export function setLocalModelsRoot(rootPath: string): {
   localModelsRoot: string;
+  searchRoots: string[];
   catalog: LocalDiskModel[];
   models: ModelSlotStatus[];
   machine: MachineEnvironment;
 } {
-  const trimmed = rootPath.trim();
+  const trimmed = sanitizePathInput(rootPath);
   let resolved = '';
   if (trimmed) {
     resolved = path.isAbsolute(trimmed) ? trimmed : path.resolve(process.cwd(), trimmed);
@@ -320,11 +433,17 @@ export function setLocalModelsRoot(rootPath: string): {
   const regPath = getRegistryPath();
   const parsed = readRegistryFile();
   parsed.localModelsRoot = trimmed ? resolved : '';
+  const currentRoots = Array.isArray(parsed.searchRoots) ? parsed.searchRoots.map(sanitizePathInput).filter(Boolean) : [];
+  if (resolved && !currentRoots.includes(resolved)) {
+    currentRoots.unshift(resolved);
+  }
+  parsed.searchRoots = currentRoots;
   fs.writeFileSync(regPath, JSON.stringify(parsed, null, 2) + '\n', 'utf-8');
 
-  const catalog = resolved ? scanDirectoryForModels(resolved, 'models_root', 2) : [];
+  const catalog = collectAllRootModels(getSearchRoots());
   return {
     localModelsRoot: parsed.localModelsRoot || '',
+    searchRoots: parsed.searchRoots,
     catalog,
     models: getAllModelsStatus(),
     machine: getMachineEnvironment(),
@@ -364,7 +483,7 @@ export function updateModelSlotConfig(
     slot.modelName = updates.modelName.trim();
   }
   if (typeof updates.selectedModelPath === 'string') {
-    slot.selectedModelPath = updates.selectedModelPath.trim();
+    slot.selectedModelPath = sanitizePathInput(updates.selectedModelPath);
     if (slot.selectedModelPath && (!slot.providerType || slot.providerType === 'auto')) {
       slot.providerType = slot.selectedModelPath.toLowerCase().endsWith('.py') ? 'python_cli' : 'local_disk';
     }
@@ -377,7 +496,7 @@ export function updateModelSlotConfig(
   }
 
   fs.writeFileSync(regPath, JSON.stringify(parsed, null, 2) + '\n', 'utf-8');
-  return resolveModelSlotStatus(slot);
+  return resolveModelSlotStatus(slot, undefined, undefined, undefined, parsed.models);
 }
 
 export function applyLocalLlmPreset(config: {
@@ -414,7 +533,7 @@ export function applyLocalLlmPreset(config: {
 
   fs.writeFileSync(regPath, JSON.stringify(parsed, null, 2) + '\n', 'utf-8');
   return Object.values(parsed.models as Record<ModelSlotId, ModelRegistryEntry>).map((entry) =>
-    resolveModelSlotStatus(entry)
+    resolveModelSlotStatus(entry, undefined, undefined, undefined, parsed.models)
   );
 }
 
@@ -455,10 +574,17 @@ function classifyModelFileKind(fileName: string): LocalDiskModel['kind'] {
 function classifyModelDirKind(dirPath: string): LocalDiskModel['kind'] | null {
   try {
     const files = fs.readdirSync(dirPath).map((f) => f.toLowerCase());
-    if (files.includes('speakers_xtts.pth') || (dirPath.toLowerCase().includes('xtts') && files.includes('config.json'))) {
+    const fullLower = dirPath.toLowerCase();
+    if (
+      fullLower.includes('omnivoice') &&
+      files.some((f) => f.endsWith('.safetensors') || f.endsWith('.bin') || f.endsWith('.pt'))
+    ) {
       return 'coqui_xtts';
     }
-    if (files.includes('model.bin') && (files.includes('vocabulary.json') || files.includes('vocabulary.txt') || dirPath.toLowerCase().includes('whisper'))) {
+    if (files.includes('speakers_xtts.pth') || (fullLower.includes('xtts') && files.includes('config.json'))) {
+      return 'coqui_xtts';
+    }
+    if (files.includes('model.bin') && (files.includes('vocabulary.json') || files.includes('vocabulary.txt') || fullLower.includes('whisper'))) {
       return 'ct2_whisper';
     }
     if (files.includes('config.json') && files.some((f) => f.endsWith('.safetensors') || f.endsWith('.bin') || f.endsWith('.pt') || f === 'tokenizer.json')) {
@@ -485,10 +611,12 @@ const SLOT_SUBFOLDER_NAMES = new Set([
   'scripts',
 ]);
 
+const SKIP_SCAN_DIRS = new Set(['.git', '__pycache__', 'node_modules', 'blobs', 'refs', '.no_exist']);
+
 export function scanDirectoryForModels(
   baseDir: string,
   source: LocalDiskModel['source'],
-  maxDepth = 2,
+  maxDepth = 4,
   skipSlotSubfolders = false
 ): LocalDiskModel[] {
   if (!fs.existsSync(baseDir)) return [];
@@ -510,15 +638,22 @@ export function scanDirectoryForModels(
       const rel = path.relative(process.cwd(), fullPath) || fullPath;
 
       if (entry.isDirectory()) {
+        if (SKIP_SCAN_DIRS.has(entry.name)) continue;
         if (skipSlotSubfolders && depth === 0 && SLOT_SUBFOLDER_NAMES.has(entry.name)) {
           continue;
         }
         const dirKind = classifyModelDirKind(fullPath);
         if (dirKind) {
           const sizeBytes = getDirTotalSize(fullPath);
+          const parentName = path.basename(path.dirname(fullPath));
+          const grandParentName = path.basename(path.dirname(path.dirname(fullPath)));
+          const displayName =
+            parentName === 'snapshots' && grandParentName.startsWith('models--')
+              ? grandParentName.replace(/^models--/, '').replace(/--/g, '/')
+              : entry.name;
           results.push({
             id: fullPath,
-            name: entry.name,
+            name: displayName,
             path: fullPath,
             relativePath: rel,
             kind: dirKind,
@@ -584,12 +719,12 @@ function inferAdapterFromEndpoint(endpoint: string, supportsLocalLlm: boolean): 
 }
 
 function resolveDiskPath(p: string): string {
-  const trimmed = p.trim();
+  const trimmed = sanitizePathInput(p);
   if (!trimmed) return '';
   return path.isAbsolute(trimmed) ? trimmed : path.resolve(process.cwd(), trimmed);
 }
 
-export function resolveModelSlotStatus(
+function resolveDirectModelSlotStatus(
   entry: ModelRegistryEntry,
   cachedLocalRoot?: string,
   cachedRootModels?: LocalDiskModel[],
@@ -606,20 +741,17 @@ export function resolveModelSlotStatus(
   const scriptExists = fs.existsSync(scriptAbs);
   const detectedFiles = listFolderFiles(entry.folder);
 
-  // Scan local weights/folders inside slot folder + shared models/ + custom localModelsRoot
+  // Scan local weights/folders inside slot folder + shared models/ + all fixed/configured searchRoots
   const slotFolderAbs = path.join(process.cwd(), entry.folder);
-  const slotModels = scanDirectoryForModels(slotFolderAbs, 'slot_folder', 2);
-  const rootPath = cachedLocalRoot !== undefined ? cachedLocalRoot : getLocalModelsRoot();
+  const slotModels = scanDirectoryForModels(slotFolderAbs, 'slot_folder', 3);
   const rootModels =
     cachedRootModels !== undefined
       ? cachedRootModels
-      : rootPath
-      ? scanDirectoryForModels(rootPath, 'models_root', 2)
-      : [];
+      : collectAllRootModels(cachedLocalRoot ? [cachedLocalRoot, ...getSearchRoots()] : getSearchRoots());
   const sharedModels =
     cachedSharedModels !== undefined
       ? cachedSharedModels
-      : scanDirectoryForModels(path.join(process.cwd(), 'models'), 'models_shared', 1, true);
+      : scanDirectoryForModels(path.join(process.cwd(), 'models'), 'models_shared', 2, true);
 
   const seenPaths = new Set<string>();
   const availableLocalModels: LocalDiskModel[] = [];
@@ -630,7 +762,7 @@ export function resolveModelSlotStatus(
     }
   }
 
-  const selectedModelPath = (entry.selectedModelPath || '').trim();
+  const selectedModelPath = sanitizePathInput(entry.selectedModelPath || '');
   const selectedAbs = selectedModelPath ? resolveDiskPath(selectedModelPath) : '';
   const selectedExists = Boolean(selectedAbs && fs.existsSync(selectedAbs));
   const autoSlotWeight = slotModels.find((m) => m.kind !== 'python_script');
@@ -673,6 +805,22 @@ export function resolveModelSlotStatus(
     }
   }
 
+  const effectiveModelPath =
+    activeAdapter === 'local_disk'
+      ? selectedModelPath || autoSlotWeight?.path || ''
+      : activeAdapter === 'python_cli'
+      ? selectedModelPath && selectedModelPath.toLowerCase().endsWith('.py')
+        ? selectedModelPath
+        : entry.scriptPath
+      : '';
+
+  const effectiveModelLabel =
+    activeAdapter === 'local_disk'
+      ? path.basename(effectiveModelPath || 'local')
+      : activeAdapter === 'python_cli'
+      ? path.basename(effectiveModelPath || entry.scriptPath)
+      : modelName || (endpoint ? activeAdapter : '');
+
   return {
     id: entry.id,
     nameAr: entry.nameAr,
@@ -694,34 +842,225 @@ export function resolveModelSlotStatus(
     detectedFiles,
     helperScript: entry.helperScript,
     supportsInternet: Boolean(entry.supportsInternet),
-    internetAccess: Boolean(entry.internetAccess),
+    internetAccess: entry.supportsInternet ? entry.internetAccess !== false : Boolean(entry.internetAccess),
+    inheritedFrom: null,
+    effectiveModelPath,
+    effectiveModelLabel,
     readyForCustomModel: true,
   };
 }
 
+export function resolveModelSlotStatus(
+  entry: ModelRegistryEntry,
+  cachedLocalRoot?: string,
+  cachedRootModels?: LocalDiskModel[],
+  cachedSharedModels?: LocalDiskModel[],
+  registryModels?: Record<string, ModelRegistryEntry>
+): ModelSlotStatus {
+  const direct = resolveDirectModelSlotStatus(
+    entry,
+    cachedLocalRoot,
+    cachedRootModels,
+    cachedSharedModels
+  );
+
+  // Unified Smart Model ownership:
+  // If diacritics_search ("هات تشكيل") or prompt_generator ("برومبتات") has no standalone override,
+  // automatically delegate to the user's configured Smart Studio model (`smart_studio`).
+  if (
+    (entry.id === 'diacritics_search' || entry.id === 'prompt_generator') &&
+    entry.providerType !== 'fallback_ai' &&
+    direct.activeAdapter === 'fallback_ai'
+  ) {
+    const modelsMap = registryModels || loadModelRegistry();
+    const smartEntry = modelsMap.smart_studio;
+    if (smartEntry) {
+      const smartDirect = resolveDirectModelSlotStatus(
+        smartEntry,
+        cachedLocalRoot,
+        cachedRootModels,
+        cachedSharedModels
+      );
+      if (smartDirect.activeAdapter !== 'fallback_ai') {
+        return {
+          ...direct,
+          activeAdapter: smartDirect.activeAdapter,
+          configuredEndpoint: smartDirect.configuredEndpoint,
+          modelName: smartDirect.modelName,
+          hasApiKey: smartDirect.hasApiKey,
+          strictLocal: smartDirect.strictLocal,
+          internetAccess: smartDirect.internetAccess && direct.internetAccess,
+          inheritedFrom: 'smart_studio',
+          effectiveModelPath: smartDirect.effectiveModelPath,
+          effectiveModelLabel: smartDirect.effectiveModelLabel,
+        };
+      }
+      return {
+        ...direct,
+        internetAccess: smartDirect.internetAccess && direct.internetAccess,
+        inheritedFrom: 'smart_studio',
+      };
+    }
+  }
+
+  return direct;
+}
+
 export function getAllModelsStatus(): ModelSlotStatus[] {
   const parsed = readRegistryFile();
-  const rootPath = (parsed.localModelsRoot || '').trim();
-  const rootModels = rootPath ? scanDirectoryForModels(rootPath, 'models_root', 2) : [];
-  const sharedModels = scanDirectoryForModels(path.join(process.cwd(), 'models'), 'models_shared', 1, true);
+  const roots = getSearchRoots();
+  const rootModels = collectAllRootModels(roots);
+  const sharedModels = scanDirectoryForModels(path.join(process.cwd(), 'models'), 'models_shared', 2, true);
   return Object.values(parsed.models).map((entry) =>
-    resolveModelSlotStatus(entry, rootPath, rootModels, sharedModels)
+    resolveModelSlotStatus(entry, roots[0] || '', rootModels, sharedModels, parsed.models)
   );
 }
 
+export function autoAssignModels(options?: {
+  overwriteExisting?: boolean;
+  fixMismatches?: boolean;
+}): {
+  assigned: Array<{ slotId: ModelSlotId; modelName: string; path: string; reason: string }>;
+  models: ModelSlotStatus[];
+  discoveredCount: number;
+} {
+  const parsed = readRegistryFile();
+  const manifest = getBackendsManifest();
+  const recs: Record<string, { preferredPatterns?: string[]; excludePatterns?: string[] }> =
+    manifest.slotRecommendations || {};
+
+  const roots = getSearchRoots();
+  const rootModels = collectAllRootModels(roots);
+  const sharedModels = scanDirectoryForModels(path.join(process.cwd(), 'models'), 'models_shared', 2, true);
+  const allCatalog: LocalDiskModel[] = [];
+  const seen = new Set<string>();
+  for (const m of [...sharedModels, ...rootModels]) {
+    if (!seen.has(m.path)) {
+      seen.add(m.path);
+      allCatalog.push(m);
+    }
+  }
+
+  const assigned: Array<{ slotId: ModelSlotId; modelName: string; path: string; reason: string }> = [];
+  const primarySlots: ModelSlotId[] = [
+    'asr_diacritics',
+    'tts_reader',
+    'smart_studio',
+    'rhyme_rewrite',
+    'web_lyrics_agent',
+    'voice_clone',
+  ];
+
+  let modified = false;
+
+  for (const slotId of primarySlots) {
+    const entry = parsed.models[slotId];
+    if (!entry) continue;
+
+    // Sanitize quotes from existing selectedModelPath first
+    const cleanedExisting = sanitizePathInput(entry.selectedModelPath || '');
+    if (cleanedExisting !== (entry.selectedModelPath || '')) {
+      entry.selectedModelPath = cleanedExisting;
+      modified = true;
+    }
+
+    const existingExists = Boolean(cleanedExisting && fs.existsSync(resolveDiskPath(cleanedExisting)));
+    const rec = recs[slotId] || {};
+    const excludes = (rec.excludePatterns || []).map((p) => p.toLowerCase());
+    const isMismatched =
+      Boolean(options?.fixMismatches) &&
+      Boolean(cleanedExisting) &&
+      excludes.some((ex) => cleanedExisting.toLowerCase().includes(ex));
+
+    if (existingExists && !options?.overwriteExisting && !isMismatched) {
+      continue;
+    }
+
+    const slotFolderAbs = path.join(process.cwd(), entry.folder);
+    const slotModels = scanDirectoryForModels(slotFolderAbs, 'slot_folder', 3).filter(
+      (m) => m.kind !== 'python_script'
+    );
+    const candidates = [...slotModels, ...allCatalog];
+    const preferred = (rec.preferredPatterns || []).map((p) => p.toLowerCase());
+
+    let bestMatch: LocalDiskModel | undefined;
+    for (const pat of preferred) {
+      bestMatch = candidates.find((c) => {
+        const hay = `${c.name} ${c.path}`.toLowerCase();
+        if (!hay.includes(pat)) return false;
+        if (excludes.some((ex) => hay.includes(ex))) return false;
+        return true;
+      });
+      if (bestMatch) break;
+    }
+
+    if (bestMatch) {
+      entry.selectedModelPath = bestMatch.path;
+      entry.providerType = bestMatch.kind === 'python_script' ? 'python_cli' : 'local_disk';
+      entry.strictLocal = true;
+      modified = true;
+      assigned.push({
+        slotId,
+        modelName: bestMatch.name,
+        path: bestMatch.path,
+        reason: isMismatched ? 'mismatch_repaired' : 'auto_matched',
+      });
+    }
+  }
+
+  // Inherited smart slots: repair bad paths if requested, otherwise keep inheriting smart_studio
+  for (const inheritedSlot of ['diacritics_search', 'prompt_generator'] as ModelSlotId[]) {
+    const entry = parsed.models[inheritedSlot];
+    if (!entry) continue;
+    const cleaned = sanitizePathInput(entry.selectedModelPath || '');
+    if (cleaned !== (entry.selectedModelPath || '')) {
+      entry.selectedModelPath = cleaned;
+      modified = true;
+    }
+    if (options?.overwriteExisting) {
+      entry.selectedModelPath = '';
+      entry.providerType = 'auto';
+      modified = true;
+    }
+  }
+
+  if (modified) {
+    fs.writeFileSync(getRegistryPath(), JSON.stringify(parsed, null, 2) + '\n', 'utf-8');
+  }
+
+  return {
+    assigned,
+    models: getAllModelsStatus(),
+    discoveredCount: allCatalog.length,
+  };
+}
+
 export function getMachineEnvironment(): MachineEnvironment {
-  const pythonBin = process.env.PYTHON_BIN || 'python3';
+  const pythonBin = resolvePythonExecutable();
   let pythonAvailable = false;
   let pythonVersion: string | null = null;
+  let pipAvailable = false;
+  let ffmpegAvailable = false;
   let pythonPackages: Record<string, boolean> = {
     llama_cpp: false,
     transformers: false,
+    accelerate: false,
+    safetensors: false,
     torch: false,
     faster_whisper: false,
     TTS: false,
     piper: false,
     onnxruntime: false,
+    soundfile: false,
+    librosa: false,
   };
+
+  try {
+    execFileSync('ffmpeg', ['-version'], { encoding: 'utf-8', timeout: 1500 });
+    ffmpegAvailable = true;
+  } catch {
+    ffmpegAvailable = false;
+  }
 
   try {
     const out = execFileSync(pythonBin, ['--version'], {
@@ -731,13 +1070,20 @@ export function getMachineEnvironment(): MachineEnvironment {
     pythonAvailable = true;
     pythonVersion = out || 'Python';
 
+    try {
+      execFileSync(pythonBin, ['-m', 'pip', '--version'], { encoding: 'utf-8', timeout: 2000 });
+      pipAvailable = true;
+    } catch {
+      pipAvailable = false;
+    }
+
     const pkgProbe = execFileSync(
       pythonBin,
       [
         '-c',
-        "import importlib.util, json; mods=['llama_cpp','transformers','torch','faster_whisper','TTS','piper','onnxruntime']; print(json.dumps({m: importlib.util.find_spec(m) is not None for m in mods}))",
+        "import importlib.util, json; mods=['llama_cpp','transformers','accelerate','safetensors','torch','faster_whisper','TTS','piper','onnxruntime','soundfile','librosa']; print(json.dumps({m: importlib.util.find_spec(m) is not None for m in mods}))",
       ],
-      { encoding: 'utf-8', timeout: 3000 }
+      { encoding: 'utf-8', timeout: 4000 }
     ).trim();
     pythonPackages = JSON.parse(pkgProbe);
   } catch {
@@ -754,10 +1100,49 @@ export function getMachineEnvironment(): MachineEnvironment {
     pythonBin,
     pythonAvailable,
     pythonVersion,
+    pipAvailable,
+    ffmpegAvailable,
     pythonPackages,
     localModelsRoot: getLocalModelsRoot(),
+    searchRoots: getSearchRoots(),
     geminiKeyConfigured: Boolean(process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY.trim()),
   };
+}
+
+export async function installPythonBackends(packages?: string[]): Promise<{
+  ok: boolean;
+  command: string;
+  stdout: string;
+  stderr: string;
+  machine: MachineEnvironment;
+}> {
+  const pythonBin = resolvePythonExecutable();
+  const reqFile = path.join(process.cwd(), 'requirements.txt');
+  const args =
+    Array.isArray(packages) && packages.length > 0
+      ? ['-m', 'pip', 'install', '--upgrade', ...packages]
+      : fs.existsSync(reqFile)
+      ? ['-m', 'pip', 'install', '-r', reqFile]
+      : ['-m', 'pip', 'install', 'llama-cpp-python', 'torch', 'transformers', 'faster-whisper', 'piper-tts', 'soundfile'];
+
+  const cmdStr = `${pythonBin} ${args.join(' ')}`;
+
+  return new Promise((resolve) => {
+    execFile(
+      pythonBin,
+      args,
+      { cwd: process.cwd(), timeout: 300000, maxBuffer: 4 * 1024 * 1024 },
+      (err, stdout, stderr) => {
+        resolve({
+          ok: !err,
+          command: cmdStr,
+          stdout: (stdout || '').slice(-4000),
+          stderr: (stderr || (err ? err.message : '')).slice(-4000),
+          machine: getMachineEnvironment(),
+        });
+      }
+    );
+  });
 }
 
 export async function discoverLocalLlms(customUrl?: string): Promise<LocalLlmDiscovery[]> {
@@ -1092,7 +1477,7 @@ async function invokePythonCli(scriptPathInput: string, payload: Record<string, 
   const absScript = path.isAbsolute(scriptPathInput)
     ? scriptPathInput
     : path.join(process.cwd(), scriptPathInput);
-  const pythonBin = process.env.PYTHON_BIN || 'python3';
+  const pythonBin = resolvePythonExecutable();
 
   return new Promise((resolve, reject) => {
     const child = spawn(pythonBin, [absScript], {
@@ -1355,7 +1740,7 @@ function ensurePythonWorker(): ChildProcessWithoutNullStreams {
     return pythonWorker;
   }
 
-  const pythonBin = process.env.PYTHON_BIN || 'python3';
+  const pythonBin = resolvePythonExecutable();
   const engineScript = path.join(process.cwd(), 'models', 'local_engine.py');
   const child = spawn(pythonBin, [engineScript, '--worker'], {
     cwd: process.cwd(),
@@ -1767,8 +2152,10 @@ export async function dispatchModelTask<T = any>({
     return { result, engine: 'fallback_ai' };
   }
 
-  const status = resolveModelSlotStatus(entry);
-  const apiKey = (entry.apiKey || '').trim();
+  const status = resolveModelSlotStatus(entry, undefined, undefined, undefined, registry);
+  const effectiveEntry = status.inheritedFrom ? registry[status.inheritedFrom] || entry : entry;
+  const effectiveSlotId = effectiveEntry.id;
+  const apiKey = (effectiveEntry.apiKey || '').trim();
   const active = status.activeAdapter;
 
   if (status.strictLocal && active === 'fallback_ai') {
@@ -1786,7 +2173,8 @@ export async function dispatchModelTask<T = any>({
   const pipelineCtx = pipelineStorage.getStore();
   const effectiveLocalModel =
     active === 'local_disk'
-      ? status.selectedModelPath ||
+      ? status.effectiveModelPath ||
+        status.selectedModelPath ||
         status.availableLocalModels.find((m) => m.source === 'slot_folder' && m.kind !== 'python_script')?.path ||
         ''
       : '';
@@ -1796,11 +2184,12 @@ export async function dispatchModelTask<T = any>({
       ? path.basename(effectiveLocalModel || 'local')
       : active === 'python_cli'
       ? path.basename(
-          status.selectedModelPath && status.selectedModelPath.toLowerCase().endsWith('.py')
-            ? status.selectedModelPath
-            : entry.scriptPath
+          status.effectiveModelPath ||
+            (status.selectedModelPath && status.selectedModelPath.toLowerCase().endsWith('.py')
+              ? status.selectedModelPath
+              : effectiveEntry.scriptPath)
         )
-      : status.modelName || entry.id;
+      : status.modelName || effectiveSlotId;
 
   const modelKey = `${active}:${effectiveLocalModel || status.configuredEndpoint || ''}:${modelLabel}`;
   if (pipelineCtx) {
@@ -1899,9 +2288,10 @@ export async function dispatchModelTask<T = any>({
         attachTempAudioPaths(entry.id, payload, cliPayload, tempFiles);
 
         const scriptToRun =
-          status.selectedModelPath && status.selectedModelPath.toLowerCase().endsWith('.py')
+          status.effectiveModelPath ||
+          (status.selectedModelPath && status.selectedModelPath.toLowerCase().endsWith('.py')
             ? status.selectedModelPath
-            : entry.scriptPath;
+            : effectiveEntry.scriptPath);
 
         const raw = await invokePythonCli(scriptToRun, cliPayload);
         return { result: raw as T, engine: `python_cli:${path.basename(scriptToRun)}` };
@@ -2039,7 +2429,8 @@ export async function testModelSlotConnection(
     const registry = loadModelRegistry();
     const entry = registry[slotId];
     if (!entry) throw new Error(`Unknown model slot: ${slotId}`);
-    const status = resolveModelSlotStatus(entry);
+    const status = resolveModelSlotStatus(entry, undefined, undefined, undefined, registry);
+    const effectiveEntry = status.inheritedFrom ? registry[status.inheritedFrom] || entry : entry;
 
     if (status.activeAdapter === 'local_disk') {
       const env = getMachineEnvironment();
@@ -2047,6 +2438,7 @@ export async function testModelSlotConnection(
         throw new Error(`Python runtime (${env.pythonBin}) not found on this machine.`);
       }
       const effectiveModel =
+        status.effectiveModelPath ||
         status.selectedModelPath ||
         status.availableLocalModels.find((m) => m.source === 'slot_folder' && m.kind !== 'python_script')?.path ||
         '';
@@ -2056,7 +2448,7 @@ export async function testModelSlotConnection(
 
       const inspectOut = execFileSync(
         env.pythonBin,
-        [path.join(process.cwd(), 'models', 'local_engine.py'), '--inspect', effectiveModel, slotId],
+        [path.join(process.cwd(), 'models', 'local_engine.py'), '--inspect', effectiveModel, effectiveEntry.id],
         { encoding: 'utf-8', timeout: 5000 }
       );
       const parsed = JSON.parse(inspectOut);
@@ -2077,9 +2469,10 @@ export async function testModelSlotConnection(
         throw new Error(`Python executable (${env.pythonBin}) not found`);
       }
       const scriptUsed =
-        status.selectedModelPath && status.selectedModelPath.toLowerCase().endsWith('.py')
+        status.effectiveModelPath ||
+        (status.selectedModelPath && status.selectedModelPath.toLowerCase().endsWith('.py')
           ? status.selectedModelPath
-          : entry.scriptPath;
+          : effectiveEntry.scriptPath);
       return {
         ok: true,
         engine: `python_cli:${path.basename(scriptUsed)}`,

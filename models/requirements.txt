@@ -1,28 +1,40 @@
 # ==============================================================================
-# Hafiz Bel'Amya - Direct Local Disk Models Engine Requirements
-# Install these once on your machine to run local .gguf, HuggingFace, Whisper,
-# Piper, and Coqui/XTTS models directly from disk with ZERO external APIs.
+# Hafiz Bel'Amya - Complete Local Disk AI Backends Requirements
+# Synced with root requirements.txt
 # ==============================================================================
 
-# 1. Local .gguf LLMs (Qwen, Llama, Gemma, Mistral, Aya, etc.)
-llama-cpp-python>=0.2.90
+# 1. Local .gguf LLMs (Qwen, Nile-Chat, VoiceTut-GGUF, Llama, Gemma, gpt-oss)
+llama-cpp-python>=0.3.2
 
-# 2. HuggingFace Local Models (LLMs, Arabic Diacritizers, Whisper HF, MMS-TTS)
-torch>=2.1.0
-transformers>=4.44.0
-accelerate>=0.33.0
-safetensors>=0.4.3
+# 2. HuggingFace Local Models (Cohere-Speech-Tashkeel-2B, OmniVoice, Transformers, LoRAs)
+torch>=2.3.0
+torchaudio>=2.3.0
+transformers>=4.46.0
+accelerate>=0.34.0
+safetensors>=0.4.5
 sentencepiece>=0.2.0
+protobuf>=4.25.0
+huggingface_hub>=0.25.0
+einops>=0.8.0
+peft>=0.12.0
 
-# 3. Direct Local Speech-to-Text (ASR)
+# 3. Direct Local Speech-to-Text (faster-whisper-large-v3-turbo, CTranslate2, HF ASR)
 faster-whisper>=1.0.3
-# Optional for standard OpenAI Whisper .pt checkpoints:
-# openai-whisper
+ctranslate2>=4.4.0
 
-# 4. Direct Local Text-to-Speech (TTS) & Voice Cloning
-piper-tts>=1.2.0
-onnxruntime>=1.18.0
+# 4. Audio Decoding & Resampling
 soundfile>=0.12.1
-numpy>=1.26.0
-# Optional for Coqui XTTS-v2 local voice cloning:
+librosa>=0.10.2
+scipy>=1.13.0
+numpy>=1.26.0,<2.3.0
+
+# 5. Direct Local Text-to-Speech (Piper .onnx & ONNX Runtime)
+piper-tts>=1.2.0
+onnxruntime>=1.19.0
+
+# 6. Utilities
+requests>=2.32.0
+
+# Optional / Python-version specific:
+# openai-whisper>=20231117
 # TTS>=0.22.0

@@ -93,15 +93,36 @@ def get_or_load_single_model(cache_key: str, loader: Callable[[], Any]) -> Any:
 PACKAGE_IMPORT_MAP = {
     "llama_cpp": "llama-cpp-python",
     "transformers": "transformers",
+    "accelerate": "accelerate",
+    "safetensors": "safetensors",
     "torch": "torch",
     "faster_whisper": "faster-whisper",
     "whisper": "openai-whisper",
     "piper": "piper-tts",
     "onnxruntime": "onnxruntime",
     "TTS": "TTS",
+    "omnivoice": "omnivoice",
     "soundfile": "soundfile",
+    "librosa": "librosa",
     "numpy": "numpy",
 }
+
+
+def sanitize_path_str(raw: str) -> str:
+    s = (raw or "").strip()
+    if len(s) >= 2 and ((s[0] == '"' and s[-1] == '"') or (s[0] == "'" and s[-1] == "'")):
+        s = s[1:-1].strip()
+    return s
+
+
+def resolve_hf_snapshot_dir(p: Path) -> Path:
+    """If user points to a HuggingFace cache root (models--org--name), resolve snapshots/<hash>."""
+    snaps = p / "snapshots"
+    if snaps.is_dir():
+        candidates = [d for d in sorted(snaps.iterdir(), reverse=True) if d.is_dir()]
+        if candidates:
+            return candidates[0]
+    return p
 
 
 def has_pkg(mod_name: str) -> bool:
@@ -142,8 +163,9 @@ def get_dir_size_bytes(p: Path) -> int:
 
 def detect_model_kind(model_path_str: str, slot_id: str = "") -> Tuple[str, List[str]]:
     """Classify a local file or directory into a runnable engine type + required Python modules."""
-    p = Path(model_path_str)
+    p = resolve_hf_snapshot_dir(Path(sanitize_path_str(model_path_str)))
     name_lower = p.name.lower()
+    full_lower = str(p).lower()
 
     if p.is_file():
         if name_lower.endswith(".py"):
@@ -161,15 +183,21 @@ def detect_model_kind(model_path_str: str, slot_id: str = "") -> Tuple[str, List
                 return "rvc_or_pth_voice", ["torch"]
             return "torch_checkpoint", ["torch"]
         if name_lower.endswith(".safetensors") or name_lower.endswith(".bin"):
-            # Often part of a HuggingFace directory
+            if "omnivoice" in full_lower:
+                return "omnivoice", ["torch", "transformers", "soundfile"]
             parent = p.parent
             if (parent / "config.json").exists():
                 return detect_model_kind(str(parent), slot_id)
-            return "raw_weight_file", ["torch"]
+            return "raw_weight_file", ["torch", "safetensors"]
         return "unknown_file", []
 
     if p.is_dir():
         files_lower = {f.name.lower() for f in p.iterdir() if f.is_file()}
+
+        # OmniVoice TTS & Zero-Shot Voice Cloning folder
+        if "omnivoice" in full_lower and any(f.endswith((".safetensors", ".bin", ".pt")) for f in files_lower):
+            return "omnivoice", ["torch", "transformers", "soundfile"]
+
         # CTranslate2 Whisper directory
         if "model.bin" in files_lower and (
             slot_id == "asr_diacritics"
@@ -190,7 +218,7 @@ def detect_model_kind(model_path_str: str, slot_id: str = "") -> Tuple[str, List
         # HuggingFace directory
         if "config.json" in files_lower:
             if slot_id == "asr_diacritics":
-                return "hf_asr", ["transformers", "torch"]
+                return "hf_asr", ["transformers", "torch", "soundfile"]
             if slot_id == "tts_reader":
                 return "hf_tts", ["transformers", "torch", "soundfile"]
             return "hf_llm", ["transformers", "torch"]
@@ -209,7 +237,8 @@ def detect_model_kind(model_path_str: str, slot_id: str = "") -> Tuple[str, List
 
 
 def inspect_model(model_path_str: str, slot_id: str = "") -> Dict[str, Any]:
-    if not model_path_str:
+    cleaned = sanitize_path_str(model_path_str)
+    if not cleaned:
         return {
             "ok": False,
             "modelExists": False,
@@ -222,7 +251,7 @@ def inspect_model(model_path_str: str, slot_id: str = "") -> Dict[str, Any]:
             "error": "No modelPath provided.",
         }
 
-    p = Path(model_path_str)
+    p = Path(cleaned)
     if not p.is_absolute():
         p = Path.cwd() / p
 
@@ -239,10 +268,11 @@ def inspect_model(model_path_str: str, slot_id: str = "") -> Dict[str, Any]:
             "error": f"Model path does not exist on disk: {p}",
         }
 
-    kind, req_mods = detect_model_kind(str(p), slot_id)
+    resolved_p = resolve_hf_snapshot_dir(p)
+    kind, req_mods = detect_model_kind(str(resolved_p), slot_id)
     installed = {m: has_pkg(m) for m in req_mods}
     missing = [PACKAGE_IMPORT_MAP.get(m, m) for m, ok in installed.items() if not ok]
-    size_bytes = get_dir_size_bytes(p)
+    size_bytes = get_dir_size_bytes(resolved_p)
 
     notes = []
     if kind in ("raw_weight_file", "unknown_file", "unknown", "torch_checkpoint", "rvc_or_pth_voice"):
@@ -460,7 +490,7 @@ def run_asr(model_path: Path, kind: str, payload: Dict[str, Any]) -> Dict[str, A
         if kind == "hf_asr":
             if not has_pkg("transformers") or not has_pkg("torch"):
                 raise RuntimeError(
-                    "Missing 'transformers' or 'torch'. Install via: pip install transformers torch"
+                    "Missing 'transformers' or 'torch'. Install via: pip install transformers torch soundfile librosa"
                 )
             import torch
             from transformers import pipeline
@@ -468,13 +498,35 @@ def run_asr(model_path: Path, kind: str, payload: Dict[str, Any]) -> Dict[str, A
             device = 0 if torch.cuda.is_available() else -1
             asr_pipe = get_or_load_single_model(
                 f"hf_asr:{model_path}",
-                lambda: pipeline("automatic-speech-recognition", model=str(model_path), device=device),
+                lambda: pipeline(
+                    "automatic-speech-recognition",
+                    model=str(model_path),
+                    device=device,
+                    trust_remote_code=True,
+                ),
             )
+            audio_input: Any = decoded_audio
+            if has_pkg("soundfile"):
+                try:
+                    import soundfile as sf
+                    import numpy as np
+
+                    samples, sr = sf.read(decoded_audio, dtype="float32")
+                    if samples.ndim > 1:
+                        samples = np.mean(samples, axis=1)
+                    if sr != 16000 and has_pkg("librosa"):
+                        import librosa
+                        samples = librosa.resample(samples, orig_sr=sr, target_sr=16000)
+                        sr = 16000
+                    audio_input = {"array": samples, "sampling_rate": sr}
+                except Exception:
+                    audio_input = decoded_audio
+
             gen_kwargs = {"language": "arabic"} if lang_code == "ar" else {}
             try:
-                res = asr_pipe(decoded_audio, generate_kwargs=gen_kwargs)
+                res = asr_pipe(audio_input, generate_kwargs=gen_kwargs)
             except Exception:
-                res = asr_pipe(decoded_audio)
+                res = asr_pipe(audio_input)
             return {"text": (res.get("text") or "").strip()}
 
     raise RuntimeError(f"Unsupported ASR model kind '{kind}'. Expected CTranslate2 Whisper folder, Whisper .pt, or HF ASR folder.")
@@ -623,6 +675,32 @@ def run_voice_clone(model_path: Path, kind: str, payload: Dict[str, Any]) -> Dic
                 "text": lyrics or "تم تنفيذ استنساخ الصوت محلياً عبر Coqui XTTS-v2 بنجاح.",
             }
 
+    if kind == "omnivoice":
+        if not has_pkg("omnivoice"):
+            raise RuntimeError(
+                "OmniVoice model detected on disk, but the 'omnivoice' Python runtime is not installed. "
+                "Install it via: pip install omnivoice (or place an infer.py wrapper inside models/voice-clone/)."
+            )
+        from omnivoice import OmniVoice  # type: ignore
+
+        model_dir = model_path.parent if model_path.is_file() else model_path
+        ov = get_or_load_single_model(f"omnivoice:{model_dir}", lambda: OmniVoice.from_pretrained(str(model_dir)))
+        target_text = lyrics or "أهلاً بِكُم فِي اسْتُودْيُو حَافِظ بِالْعَامِّيَّة"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            src_wav = convert_to_wav_if_needed(src_path, tmpdir)
+            out_wav = os.path.join(tmpdir, "omnivoice_out.wav")
+            audio_out = ov.generate(text=target_text, ref_audio=src_wav)
+            if hasattr(audio_out, "save"):
+                audio_out.save(out_wav)
+                b64 = base64.b64encode(Path(out_wav).read_bytes()).decode("ascii")
+            else:
+                b64 = array_to_wav_base64(audio_out, 24000)
+            return {
+                "audioBase64": b64,
+                "mimeType": "audio/wav",
+                "text": lyrics or "تم تنفيذ استنساخ الصوت محلياً عبر OmniVoice بنجاح.",
+            }
+
     if kind == "rvc_or_pth_voice":
         raise RuntimeError(
             "Standalone RVC .pth file detected without an inference pipeline script. "
@@ -634,7 +712,7 @@ def run_voice_clone(model_path: Path, kind: str, payload: Dict[str, Any]) -> Dic
 
 def preload_model_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     """Warm-load a single model back into RAM/VRAM without running inference."""
-    model_path_str = (payload.get("modelPath") or "").strip()
+    model_path_str = sanitize_path_str(payload.get("modelPath") or "")
     slot_id = payload.get("slotId", "")
     if not model_path_str:
         raise RuntimeError("modelPath is required for preload.")
@@ -644,6 +722,7 @@ def preload_model_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         model_path = Path.cwd() / model_path
     if not model_path.exists():
         raise FileNotFoundError(f"Selected local model does not exist on disk: {model_path}")
+    model_path = resolve_hf_snapshot_dir(model_path)
 
     apply_vram_limit_percent(payload.get("gpuMemoryLimitPercent"))
     kind, _req = detect_model_kind(str(model_path), slot_id)
@@ -700,7 +779,7 @@ def preload_model_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
 def execute_inference_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     apply_vram_limit_percent(payload.get("gpuMemoryLimitPercent"))
     slot_id = payload.get("slotId", "")
-    model_path_str = (payload.get("modelPath") or "").strip()
+    model_path_str = sanitize_path_str(payload.get("modelPath") or "")
     if not model_path_str:
         raise RuntimeError("modelPath is required for local_disk execution.")
 
@@ -711,6 +790,7 @@ def execute_inference_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not model_path.exists():
         raise FileNotFoundError(f"Selected local model does not exist on disk: {model_path}")
 
+    model_path = resolve_hf_snapshot_dir(model_path)
     kind, _req = detect_model_kind(str(model_path), slot_id)
 
     if slot_id == "asr_diacritics":

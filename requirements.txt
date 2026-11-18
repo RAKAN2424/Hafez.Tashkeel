@@ -1,0 +1,45 @@
+# ==============================================================================
+# Hafiz Bel'Amya (حَافِظ بِالْعَامِّيَّة) - Complete Local AI Backends Requirements
+# Install all local disk ML runtimes once with:
+#   pip install -r requirements.txt
+# Or run: install_backends.bat (Windows) / ./install_backends.sh (Linux/Mac)
+# ==============================================================================
+
+# 1. Local .gguf LLMs (Qwen3.5-9B, Nile-Chat-4B, VoiceTut-Egyptian-Tashkeel-GGUF, gpt-oss-20b, etc.)
+llama-cpp-python>=0.3.2
+
+# 2. HuggingFace Transformers & PyTorch Core (Cohere-Speech-Tashkeel-2B, HF LLMs, OmniVoice, Gemma, VoiceTut)
+torch>=2.3.0
+torchaudio>=2.3.0
+transformers>=4.46.0
+accelerate>=0.34.0
+safetensors>=0.4.5
+sentencepiece>=0.2.0
+protobuf>=4.25.0
+huggingface_hub>=0.25.0
+einops>=0.8.0
+peft>=0.12.0
+
+# 3. Direct Local Speech-to-Text / ASR (faster-whisper-large-v3-turbo, Cohere-Transcribe, Qwen-ASR)
+faster-whisper>=1.0.3
+ctranslate2>=4.4.0
+
+# 4. Audio I/O & DSP (Required for Whisper, HuggingFace Speech, OmniVoice, VoiceTut TTS, RVC/XTTS)
+soundfile>=0.12.1
+librosa>=0.10.2
+scipy>=1.13.0
+numpy>=1.26.0,<2.3.0
+
+# 5. Direct Local Text-to-Speech (Piper .onnx, ONNX Runtime)
+piper-tts>=1.2.0
+onnxruntime>=1.19.0
+
+# 6. Utilities & Packaging
+requests>=2.32.0
+setuptools>=70.0.0
+wheel>=0.43.0
+
+# 7. Optional Backends (installed individually by install_backends.bat or setup.py extras)
+# openai-whisper>=20231117    # For standalone Whisper .pt checkpoints
+# TTS>=0.22.0                 # Coqui XTTS-v2 Voice Cloning (best on Python 3.10-3.11)
+# omnivoice                   # OmniVoice Zero-Shot Voice Cloning & TTS (if packaged)
