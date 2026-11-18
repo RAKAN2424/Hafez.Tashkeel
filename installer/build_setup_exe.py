@@ -22,182 +22,187 @@ $ErrorActionPreference = 'Continue'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $Host.UI.RawUI.WindowTitle = "Hafiz Bel'Amya - Setup & Auto-Launcher"
 
-$Root = (Get-Location).Path
-$DlDir = Join-Path $env:TEMP 'HafizBelAmyaSetup'
-if (-not (Test-Path $DlDir)) { New-Item -ItemType Directory -Path $DlDir -Force | Out-Null }
+try {
+  $Root = (Get-Location).Path
+  $DlDir = Join-Path $env:TEMP 'HafizBelAmyaSetup'
+  if (-not (Test-Path $DlDir)) { New-Item -ItemType Directory -Path $DlDir -Force | Out-Null }
 
-Write-Host '============================================================================' -ForegroundColor Cyan
-Write-Host "  Hafiz Bel'Amya - Standalone Automated Setup (.exe)" -ForegroundColor Cyan
-Write-Host '============================================================================' -ForegroundColor Cyan
-Write-Host "Working Directory: $Root"
-Write-Host ''
+  Write-Host '============================================================================' -ForegroundColor Cyan
+  Write-Host "  Hafiz Bel'Amya - Standalone Automated Setup (.exe)" -ForegroundColor Cyan
+  Write-Host '============================================================================' -ForegroundColor Cyan
+  Write-Host "Working Directory: $Root"
+  Write-Host ''
 
-function Refresh-EnvPath {
-  $m = [System.Environment]::GetEnvironmentVariable('Path', 'Machine')
-  $u = [System.Environment]::GetEnvironmentVariable('Path', 'User')
-  $env:Path = "$m;$u"
-}
-
-function Ensure-Tool {
-  param([string]$Cmd, [string]$Title, [string]$WingetId, [string]$Url, [string]$FileName)
-  if (Get-Command $Cmd -ErrorAction SilentlyContinue) {
-    Write-Host "[OK] $Title detected." -ForegroundColor Green
-    return $true
+  function Refresh-EnvPath {
+    $m = [System.Environment]::GetEnvironmentVariable('Path', 'Machine')
+    $u = [System.Environment]::GetEnvironmentVariable('Path', 'User')
+    $env:Path = "$m;$u"
   }
-  Write-Host "[MISSING] $Title not found." -ForegroundColor Yellow
-  if (Get-Command 'winget' -ErrorAction SilentlyContinue) {
-    Write-Host "  -> Installing $Title via winget..." -ForegroundColor Cyan
-    winget install --id $WingetId --silent --accept-package-agreements --accept-source-agreements
-    Refresh-EnvPath
+
+  function Ensure-Tool {
+    param([string]$Cmd, [string]$Title, [string]$WingetId, [string]$Url, [string]$FileName)
     if (Get-Command $Cmd -ErrorAction SilentlyContinue) {
-      Write-Host "[OK] $Title installed." -ForegroundColor Green
+      Write-Host "[OK] $Title detected." -ForegroundColor Green
       return $true
     }
-  }
-  $dest = Join-Path $DlDir $FileName
-  Write-Host "  -> Downloading $Title from $Url ..." -ForegroundColor Cyan
-  try {
-    Invoke-WebRequest -Uri $Url -OutFile $dest -UseBasicParsing
-    if ($dest.EndsWith('.msi')) {
-      Start-Process msiexec.exe -ArgumentList "/i `"$dest`" /passive" -Wait
-    } elseif ($dest.EndsWith('.exe')) {
-      Start-Process $dest -ArgumentList '/passive PrependPath=1 Include_test=0' -Wait
-    } elseif ($dest.EndsWith('.zip')) {
-      $ffDir = Join-Path $Root 'installer\ffmpeg'
-      Expand-Archive -Path $dest -DestinationPath $ffDir -Force
-      $binDir = Get-ChildItem -Path $ffDir -Recurse -Directory -Filter 'bin' | Select-Object -First 1
-      if ($binDir) { $env:Path = "$($binDir.FullName);$env:Path" }
+    Write-Host "[MISSING] $Title not found." -ForegroundColor Yellow
+    if (Get-Command 'winget' -ErrorAction SilentlyContinue) {
+      Write-Host "  -> Installing $Title via winget..." -ForegroundColor Cyan
+      winget install --id $WingetId --silent --accept-package-agreements --accept-source-agreements
+      Refresh-EnvPath
+      if (Get-Command $Cmd -ErrorAction SilentlyContinue) {
+        Write-Host "[OK] $Title installed." -ForegroundColor Green
+        return $true
+      }
     }
-    Refresh-EnvPath
-  } catch {
-    Write-Host "[WARN] Download error: $_" -ForegroundColor Red
-    Start-Process $Url
+    $dest = Join-Path $DlDir $FileName
+    Write-Host "  -> Downloading $Title from $Url ..." -ForegroundColor Cyan
+    try {
+      Invoke-WebRequest -Uri $Url -OutFile $dest -UseBasicParsing
+      if ($dest.EndsWith('.msi')) {
+        Start-Process msiexec.exe -ArgumentList "/i `"$dest`" /passive" -Wait
+      } elseif ($dest.EndsWith('.exe')) {
+        Start-Process $dest -ArgumentList '/passive PrependPath=1 Include_test=0' -Wait
+      } elseif ($dest.EndsWith('.zip')) {
+        $ffDir = Join-Path $Root 'installer\ffmpeg'
+        Expand-Archive -Path $dest -DestinationPath $ffDir -Force
+        $binDir = Get-ChildItem -Path $ffDir -Recurse -Directory -Filter 'bin' | Select-Object -First 1
+        if ($binDir) { $env:Path = "$($binDir.FullName);$env:Path" }
+      }
+      Refresh-EnvPath
+    } catch {
+      Write-Host "[WARN] Download error: $_" -ForegroundColor Red
+      Start-Process $Url
+    }
+    return [bool](Get-Command $Cmd -ErrorAction SilentlyContinue)
   }
-  return [bool](Get-Command $Cmd -ErrorAction SilentlyContinue)
-}
 
-Write-Host '[1/5] Checking System Tools (Python 3.11, Node.js 20, FFmpeg)...' -ForegroundColor White
-$hasPy = Ensure-Tool 'python' 'Python 3.11' 'Python.Python.3.11' 'https://www.python.org/ftp/python/3.11.9/python-3.11.9-amd64.exe' 'python-3.11.9-amd64.exe'
-$hasNode = Ensure-Tool 'node' 'Node.js 20 LTS' 'OpenJS.NodeJS.LTS' 'https://nodejs.org/dist/v20.18.1/node-v20.18.1-x64.msi' 'node-v20.18.1-x64.msi'
-$null = Ensure-Tool 'ffmpeg' 'FFmpeg' 'Gyan.FFmpeg' 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip' 'ffmpeg-release-essentials.zip'
+  Write-Host '[1/5] Checking System Tools (Python 3.11, Node.js 20, FFmpeg)...' -ForegroundColor White
+  $hasPy = Ensure-Tool 'python' 'Python 3.11' 'Python.Python.3.11' 'https://www.python.org/ftp/python/3.11.9/python-3.11.9-amd64.exe' 'python-3.11.9-amd64.exe'
+  $hasNode = Ensure-Tool 'node' 'Node.js 20 LTS' 'OpenJS.NodeJS.LTS' 'https://nodejs.org/dist/v20.18.1/node-v20.18.1-x64.msi' 'node-v20.18.1-x64.msi'
+  $null = Ensure-Tool 'ffmpeg' 'FFmpeg' 'Gyan.FFmpeg' 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip' 'ffmpeg-release-essentials.zip'
 
-if (-not $hasPy) {
-  Write-Host '[ERROR] Python is required to install AI backends. Finish Python installation then run setup.exe again.' -ForegroundColor Red
-  Read-Host 'Press Enter to exit'
-  exit 1
-}
-
-$InProjectRoot = (Test-Path (Join-Path $Root 'package.json')) -and (Test-Path (Join-Path $Root 'server.ts'))
-
-if ($InProjectRoot) {
-  $LocalModelsDir = Join-Path $Root 'models\local'
-  if (-not (Test-Path $LocalModelsDir)) { New-Item -ItemType Directory -Path $LocalModelsDir -Force | Out-Null }
-  Write-Host ''
-  Write-Host '[2/5] Installing Node.js dependencies...' -ForegroundColor White
-  if ($hasNode -and (-not (Test-Path (Join-Path $Root 'node_modules')))) {
-    npm install
+  if (-not $hasPy) {
+    Write-Host '[ERROR] Python is required to install AI backends. Finish Python installation then run setup.exe again.' -ForegroundColor Red
+    Read-Host 'Press Enter to exit'
+    exit 1
   }
+
+  $InProjectRoot = (Test-Path (Join-Path $Root 'package.json')) -and (Test-Path (Join-Path $Root 'server.ts'))
+
+  if ($InProjectRoot) {
+    $LocalModelsDir = Join-Path $Root 'models\local'
+    if (-not (Test-Path $LocalModelsDir)) { New-Item -ItemType Directory -Path $LocalModelsDir -Force | Out-Null }
+    Write-Host ''
+    Write-Host '[2/5] Checking Node.js dependencies...' -ForegroundColor White
+    if ($hasNode -and (-not (Test-Path (Join-Path $Root 'node_modules')))) {
+      & npm.cmd install
+    }
+    Write-Host ''
+    Write-Host '[3/5] Checking Python environment & required AI backends...' -ForegroundColor White
+    $PyExe = Join-Path $Root '.venv\Scripts\python.exe'
+    if (-not (Test-Path $PyExe)) {
+      Write-Host '  -> Creating .venv...' -ForegroundColor Cyan
+      python -m venv .venv
+    }
+    if (-not (Test-Path $PyExe)) { $PyExe = 'python' }
+  } else {
+    Write-Host ''
+    Write-Host '[STANDALONE MODE] App folder (package.json) not found next to setup.exe.' -ForegroundColor Yellow
+    Write-Host 'Installing required AI Python backends so the app is ready when placed in the Hafiz folder...' -ForegroundColor Cyan
+    $PyExe = 'python'
+  }
+
+  $ReqPath = Join-Path $Root 'requirements.txt'
+  if (Test-Path $ReqPath) {
+    & $PyExe -m pip install -r $ReqPath --quiet
+  } else {
+    & $PyExe -m pip install llama-cpp-python torch torchaudio transformers accelerate safetensors sentencepiece protobuf huggingface_hub einops peft faster-whisper ctranslate2 soundfile librosa scipy piper-tts onnxruntime requests --quiet
+  }
+
   Write-Host ''
-  Write-Host '[3/5] Setting up Python .venv & installing GPU/CPU AI backends...' -ForegroundColor White
-  $PyExe = Join-Path $Root '.venv\Scripts\python.exe'
-  if (-not (Test-Path $PyExe)) { python -m venv .venv }
-  if (-not (Test-Path $PyExe)) { $PyExe = 'python' }
-} else {
-  Write-Host ''
-  Write-Host '[STANDALONE MODE] App folder (package.json) not found next to setup.exe.' -ForegroundColor Yellow
-  Write-Host 'Installing all required AI Python backends globally so the app is ready when extracted!' -ForegroundColor Cyan
-  $PyExe = 'python'
-}
-
-& $PyExe -m pip install --upgrade pip setuptools wheel
-$hasGpu = [bool](Get-Command 'nvidia-smi' -ErrorAction SilentlyContinue)
-if ($hasGpu) {
-  Write-Host '[GPU] NVIDIA GPU detected -> Checking/Installing CUDA 12.4 PyTorch + CUDA llama-cpp-python...' -ForegroundColor Green
-  & $PyExe -m pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu124
-  & $PyExe -m pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124
-}
-
-$ReqPath = Join-Path $Root 'requirements.txt'
-if (Test-Path $ReqPath) {
-  & $PyExe -m pip install -r $ReqPath
-} else {
-  & $PyExe -m pip install llama-cpp-python torch torchaudio transformers accelerate safetensors sentencepiece protobuf huggingface_hub einops peft faster-whisper ctranslate2 soundfile librosa scipy piper-tts onnxruntime requests
-}
-
-Write-Host '[Optional Extras] Installing omnivoice, TTS, and openai-whisper (best effort)...' -ForegroundColor DarkCyan
-& $PyExe -m pip install omnivoice --quiet
-& $PyExe -m pip install TTS --quiet
-& $PyExe -m pip install openai-whisper --quiet
-
-Write-Host ''
-Write-Host '[4/5] Online Update Check (Backends, Accelerators & CUDA)...' -ForegroundColor Cyan
-$pyCheck = "import importlib.metadata as md,json,sys,urllib.request;gpu=sys.argv[1]=='1';pkgs=['llama-cpp-python','torch','torchaudio','transformers','accelerate','safetensors','faster-whisper','ctranslate2','onnxruntime','soundfile','librosa','piper-tts','omnivoice','TTS'];vt=lambda v:tuple(([int(''.join(c for c in x if c.isdigit()) or 0) for x in v.split('+')[0].split('-')[0].split('.')]+[0,0,0,0])[:4]);upd,cu=[],[];exec(\"try:\n import torch\n if gpu and not getattr(torch.version,'cuda',None):cu.append('torch');print('[CUDA] torch CPU->cu124')\nexcept:pass\ntry:\n import llama_cpp\n fn=getattr(llama_cpp,'llama_supports_gpu_offload',None)\n if gpu and callable(fn) and not fn():cu.append('llama-cpp-python');print('[CUDA] llama CPU->cu124')\nexcept:pass\");" + @'
-for p in pkgs:
- try:
-  inst=md.version('onnxruntime-gpu') if p=='onnxruntime' else md.version(p)
- except:
-  if p=='onnxruntime':
-   try:inst=md.version('onnxruntime')
-   except:continue
-  else:continue
- try:
-  with urllib.request.urlopen(urllib.request.Request(f'https://pypi.org/pypi/{p}/json'),timeout=3.5) as r:lat=json.loads(r.read().decode()).get('info',{}).get('version')
-  if lat and vt(inst)<vt(lat):print(f'[UPDATE] {p}: {inst} -> {lat}');upd.append(p)
- except:pass
-print('OUTJSON:'+json.dumps({'updates':upd,'cuda':cu}))
+  Write-Host '[4/5] Checking NVIDIA CUDA acceleration status (critical check only)...' -ForegroundColor Cyan
+  $hasGpu = [bool](Get-Command 'nvidia-smi' -ErrorAction SilentlyContinue)
+  if ($hasGpu) {
+    $pyCuda = @'
+import sys
+missing = []
+try:
+    import torch
+    if not getattr(torch.version, 'cuda', None):
+        missing.append('torch')
+except Exception:
+    missing.append('torch')
+try:
+    import llama_cpp
+    fn = getattr(llama_cpp, 'llama_supports_gpu_offload', None)
+    if callable(fn) and not fn():
+        missing.append('llama-cpp-python')
+except Exception:
+    pass
+print(','.join(missing))
 '@
-$gpuArg = if ($hasGpu) { '1' } else { '0' }
-$checkLines = & $PyExe -c $pyCheck $gpuArg 2>$null
-$outLine = ($checkLines | Where-Object { $_ -like 'OUTJSON:*' } | Select-Object -Last 1)
-foreach ($ln in $checkLines) { if ($ln -notlike 'OUTJSON:*') { Write-Host $ln -ForegroundColor Yellow } }
-if ($outLine) {
-  $res = ($outLine.Substring(8) | ConvertFrom-Json)
-  if ($hasGpu -and ($res.cuda -contains 'torch' -or $res.updates -contains 'torch' -or $res.updates -contains 'torchaudio')) {
-    Write-Host '[AUTO-UPDATE] Upgrading PyTorch + torchaudio (CUDA 12.4)...' -ForegroundColor Green
-    & $PyExe -m pip install --upgrade torch torchaudio --index-url https://download.pytorch.org/whl/cu124
+    $needCu = (& $PyExe -c $pyCuda 2>$null | Out-String).Trim()
+    if ($needCu -match 'torch') {
+      Write-Host '[CUDA] Installing PyTorch CUDA 12.4 wheel for NVIDIA GPU...' -ForegroundColor Green
+      & $PyExe -m pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu124
+    }
+    if ($needCu -match 'llama-cpp-python') {
+      Write-Host '[CUDA] Installing llama-cpp-python CUDA 12.4 wheel...' -ForegroundColor Green
+      & $PyExe -m pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124
+    }
+    if (-not $needCu) {
+      Write-Host '[OK] NVIDIA CUDA GPU acceleration is already active.' -ForegroundColor Green
+    }
+  } else {
+    Write-Host '[INFO] No NVIDIA GPU detected; CPU mode active.' -ForegroundColor DarkCyan
   }
-  if ($hasGpu -and ($res.cuda -contains 'llama-cpp-python' -or $res.updates -contains 'llama-cpp-python')) {
-    Write-Host '[AUTO-UPDATE] Upgrading llama-cpp-python (CUDA 12.4)...' -ForegroundColor Green
-    & $PyExe -m pip install --upgrade llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124
-  }
-  $stdUpd = @($res.updates | Where-Object { -not ($hasGpu -and ($_ -eq 'torch' -or $_ -eq 'torchaudio' -or $_ -eq 'llama-cpp-python')) })
-  if ($stdUpd.Count -gt 0) {
-    $stdUpd = @($stdUpd | ForEach-Object { if ($_ -eq 'onnxruntime' -and $hasGpu) { 'onnxruntime-gpu' } else { $_ } })
-    Write-Host ("[AUTO-UPDATE] Upgrading: " + ($stdUpd -join ', ')) -ForegroundColor Green
-    & $PyExe -m pip install --upgrade $stdUpd
-  }
-  if (($res.updates.Count -eq 0) -and ($res.cuda.Count -eq 0)) {
-    Write-Host '[OK] All backends, speed accelerators, and CUDA wheels are up to date.' -ForegroundColor Green
-  }
-}
 
-Write-Host ''
-Write-Host '[5/5] Scanning mounted partitions (C:, D:, E:, ...) for AI models & auto-binding...' -ForegroundColor Green
-$sub = @('AI\LMStudio-Models\local','LMStudio-Models\local','OmniVoice','Models','models\local','.lmstudio\models','.cache\huggingface\hub')
-$drv = @([System.IO.DriveInfo]::GetDrives() | Where-Object { $_.IsReady -and ($_.DriveType -eq 'Fixed' -or $_.DriveType -eq 'Removable') })
-$hits = @()
-foreach ($d in $drv) {
-  foreach ($s in $sub) { $p = Join-Path $d.Name $s; if (Test-Path $p) { $hits += $p } }
-}
-foreach ($s in @('.lmstudio\models','.cache\huggingface\hub')) { $p = Join-Path $env:USERPROFILE $s; if (Test-Path $p) { $hits += $p } }
-if ($hits.Count -gt 0) {
-  $hits = @($hits | Select-Object -Unique)
-  Write-Host ('[FOUND] Model roots: ' + ($hits -join ' ; ')) -ForegroundColor Cyan
-} else {
-  Write-Host '[INFO] Deep partition scan will run inside Hafiz Server on boot.' -ForegroundColor DarkCyan
-}
-
-if ($InProjectRoot -and $hasNode) {
-  if ($PyExe -ne 'python') { $env:PYTHON_BIN = $PyExe }
-  $env:AUTO_UPDATE_ON_START = '1'
-  $env:HAFIZ_AUTO_SCAN_PARTITIONS = '1'
-  Start-Job -ScriptBlock { Start-Sleep -Seconds 3; Start-Process 'http://localhost:3000' } | Out-Null
-  npx tsx server.ts
-} else {
   Write-Host ''
-  Write-Host '[DONE] Dependencies installed! Place setup.exe inside the Hafiz folder and double-click to launch.' -ForegroundColor Green
-  Read-Host 'Press Enter to exit'
+  Write-Host '[5/5] Scanning mounted partitions (C:, D:, E:, ...) for AI models...' -ForegroundColor Green
+  $sub = @('AI\LMStudio-Models\local','LMStudio-Models\local','OmniVoice','Models','models\local','.lmstudio\models','.cache\huggingface\hub')
+  $drv = @([System.IO.DriveInfo]::GetDrives() | Where-Object { $_.IsReady -and ($_.DriveType -eq 'Fixed' -or $_.DriveType -eq 'Removable') })
+  $hits = @()
+  foreach ($d in $drv) {
+    foreach ($s in $sub) { $p = Join-Path $d.Name $s; if (Test-Path $p) { $hits += $p } }
+  }
+  foreach ($s in @('.lmstudio\models','.cache\huggingface\hub')) { $p = Join-Path $env:USERPROFILE $s; if (Test-Path $p) { $hits += $p } }
+  if ($hits.Count -gt 0) {
+    $hits = @($hits | Select-Object -Unique)
+    Write-Host ('[FOUND] Model roots: ' + ($hits -join ' ; ')) -ForegroundColor Cyan
+  } else {
+    Write-Host '[INFO] Partition auto-scan will run inside Hafiz Server on boot.' -ForegroundColor DarkCyan
+  }
+
+  if ($InProjectRoot -and $hasNode) {
+    if ($PyExe -ne 'python') { $env:PYTHON_BIN = $PyExe }
+    $env:DISABLE_HMR = 'true'
+    $env:HAFIZ_AUTO_SCAN_PARTITIONS = '1'
+    Start-Job -ScriptBlock {
+      for ($i = 0; $i -lt 45; $i++) {
+        try {
+          $r = Invoke-WebRequest -Uri 'http://127.0.0.1:3000/api/setup/status' -UseBasicParsing -TimeoutSec 2
+          if ($r.StatusCode -eq 200) { Start-Process 'http://localhost:3000'; break }
+        } catch {}
+        Start-Sleep -Seconds 1
+      }
+    } | Out-Null
+    Write-Host '[Server] Starting Hafiz Bel''Amya on http://localhost:3000 ...' -ForegroundColor Green
+    if (Get-Command 'npx.cmd' -ErrorAction SilentlyContinue) {
+      & npx.cmd tsx server.ts
+    } else {
+      & npx tsx server.ts
+    }
+  } else {
+    Write-Host ''
+    Write-Host '[DONE] Dependencies ready! Place setup.exe inside the Hafiz project folder and run again to start.' -ForegroundColor Green
+  }
+} catch {
+  Write-Host ''
+  Write-Host "[SETUP ERROR] $_" -ForegroundColor Red
 }
+Write-Host ''
+Read-Host 'Press Enter to close'
 """.strip()
 
 
@@ -646,7 +651,7 @@ def build_setup_exe(output_path: Path):
         headers_raw_size,
         0,
         3,
-        0x8160,
+        0x8100,
         0x100000, 0x1000,
         0x100000, 0x1000,
         0,

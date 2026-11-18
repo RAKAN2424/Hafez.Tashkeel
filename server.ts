@@ -22,6 +22,8 @@ import {
   getLocalModelsRoot,
   getMachineEnvironment,
   getSearchRoots,
+  getUpdateIntervalMs,
+  getUpdatePolicy,
   getVramStatus,
   installPythonBackends,
   loadModelRegistry,
@@ -33,9 +35,11 @@ import {
   testModelSlotConnection,
   unloadAllModels,
   updateModelSlotConfig,
+  updateUpdatePolicy,
   updateVramPolicy,
   type ModelSlotId,
   type ProviderType,
+  type UpdateScheduleMode,
 } from './models/runner.ts';
 import {
   runDiacriticsSearchScript,
@@ -375,9 +379,34 @@ async function startServer() {
         missingCorePackages,
         partitionScan: getLastPartitionScanSummary(),
         updateReport: getCachedStartupUpdateReport(),
+        updatePolicy: getUpdatePolicy(),
       });
     } catch (error: any) {
       res.status(500).json({ error: error.message || 'Failed to read setup status' });
+    }
+  });
+
+  // 1s-1a. Get / Update Background Update Check Schedule & Notify-Only Policy
+  app.get('/api/setup/update-policy', (_req, res) => {
+    try {
+      res.json({ updatePolicy: getUpdatePolicy() });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message || 'Failed to read update policy' });
+    }
+  });
+
+  app.post('/api/setup/update-policy', (req, res) => {
+    try {
+      const { schedule, notifyCriticalOnly, autoUpdateOnLaunch } = req.body || {};
+      const next = updateUpdatePolicy({
+        ...(typeof schedule === 'string' ? { schedule: schedule as UpdateScheduleMode } : {}),
+        ...(typeof notifyCriticalOnly === 'boolean' ? { notifyCriticalOnly } : {}),
+        ...(typeof autoUpdateOnLaunch === 'boolean' ? { autoUpdateOnLaunch } : {}),
+      });
+      rescheduleBackgroundUpdates();
+      res.json({ updatePolicy: next });
+    } catch (error: any) {
+      res.status(400).json({ error: error.message || 'Failed to save update policy' });
     }
   });
 
@@ -386,13 +415,13 @@ async function startServer() {
     try {
       const force = req.query.force === '1' || req.query.force === 'true';
       const updateReport = await checkBackendUpdatesOnline(force);
-      res.json({ updateReport });
+      res.json({ updateReport, updatePolicy: getUpdatePolicy() });
     } catch (error: any) {
       res.status(500).json({ error: error.message || 'Failed to check backend updates online' });
     }
   });
 
-  // 1s-1c. Auto-Update Outdated Backends, Speed Libraries & CUDA Wheels Online
+  // 1s-1c. Auto-Update Outdated Backends, Speed Libraries & CUDA Wheels Online (Explicit User Trigger)
   app.post('/api/setup/auto-update', async (req, res) => {
     try {
       const packages = Array.isArray(req.body?.packages)
@@ -1498,10 +1527,53 @@ ${taskInstruction}
     }
   });
 
+  let bgUpdateTimer: NodeJS.Timeout | null = null;
+
+  const runScheduledBackgroundCheck = async () => {
+    const policy = getUpdatePolicy();
+    if (policy.schedule === 'off') return;
+    try {
+      const report = await checkBackendUpdatesOnline(true);
+      const criticalCount = report.cudaUpgradeCount + report.missingCoreCount;
+      if (policy.autoUpdateOnLaunch && (criticalCount > 0 || report.outdatedCount > 0)) {
+        const upd = await autoUpdateBackendsOnline({ includeMissingCore: true });
+        console.log(
+          `[Hafiz Background Updater] Upgraded: ${upd.updatedPackages.join(', ') || 'none'}`
+        );
+      } else if (criticalCount > 0) {
+        console.log(
+          `[Hafiz Background Updater] Critical upgrade available: ${report.cudaUpgradeCount} CUDA upgrade(s), ${report.missingCoreCount} missing core library(s).`
+        );
+      } else if (!policy.notifyCriticalOnly && report.outdatedCount > 0) {
+        console.log(
+          `[Hafiz Background Updater] ${report.outdatedCount} optional PyPI update(s) available (notify-all mode).`
+        );
+      }
+    } catch {
+      // Non-fatal when offline
+    }
+  };
+
+  const rescheduleBackgroundUpdates = () => {
+    if (bgUpdateTimer) {
+      clearInterval(bgUpdateTimer);
+      bgUpdateTimer = null;
+    }
+    const policy = getUpdatePolicy();
+    const intervalMs = getUpdateIntervalMs(policy.schedule);
+    if (!intervalMs) return;
+    bgUpdateTimer = setInterval(() => {
+      void runScheduledBackgroundCheck();
+    }, intervalMs);
+    bgUpdateTimer.unref();
+  };
+
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
       server: {
         middlewareMode: true,
+        // Prevent Vite HMR from binding WebSocket port 24678 ("Port 24678 is already in use")
+        hmr: false,
         watch: {
           // Ignore models/registry.json & dropped weights so saving a model never reloads the page
           ignored: ['**/models/**'],
@@ -1536,34 +1608,38 @@ ${taskInstruction}
     // Non-fatal if partitions/drives are inaccessible
   }
 
-  void checkBackendUpdatesOnline(true)
-    .then(async (report) => {
-      if (report.outdatedCount > 0 || report.cudaUpgradeCount > 0) {
-        console.log(
-          `[Hafiz Online Updater] Found ${report.outdatedCount} PyPI update(s) and ${report.cudaUpgradeCount} CUDA upgrade(s).`
-        );
-        if (process.env.AUTO_UPDATE_ON_START === '1') {
-          const upd = await autoUpdateBackendsOnline({ includeMissingCore: true });
-          console.log(
-            `[Hafiz Online Updater] Auto-updated: ${upd.updatedPackages.join(', ') || 'none'}`
-          );
-        }
-      } else if (report.onlineReachable) {
-        console.log('[Hafiz Online Updater] All backends & CUDA wheels are up to date.');
-      }
-    })
-    .catch(() => {
-      // Non-fatal when offline
-    });
+  rescheduleBackgroundUpdates();
+  const initialPolicy = getUpdatePolicy();
+  const initialInterval = getUpdateIntervalMs(initialPolicy.schedule);
+  if (
+    initialInterval &&
+    (!initialPolicy.lastCheckedAt || Date.now() - initialPolicy.lastCheckedAt >= initialInterval)
+  ) {
+    void runScheduledBackgroundCheck();
+  }
 
   const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`Server running on http://localhost:${PORT}`);
+  });
+
+  server.on('error', (err: any) => {
+    if (err?.code === 'EADDRINUSE') {
+      console.error(
+        `[Hafiz] Port ${PORT} is already in use (another Hafiz instance may already be running at http://localhost:${PORT}).`
+      );
+      process.exit(0);
+    }
+    console.error('[Hafiz] Server error:', err);
   });
 
   let shuttingDown = false;
   const handleShutdown = async (signal: string) => {
     if (shuttingDown) return;
     shuttingDown = true;
+    if (bgUpdateTimer) {
+      clearInterval(bgUpdateTimer);
+      bgUpdateTimer = null;
+    }
     try {
       await Promise.race([
         unloadAllModels(`app_shutdown:${signal}`),

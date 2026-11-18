@@ -204,5 +204,11 @@
       "inputType": "dual_audio",
       "outputType": "audio_wav_base64"
     }
+  },
+  "updatePolicy": {
+    "schedule": "daily",
+    "notifyCriticalOnly": true,
+    "autoUpdateOnLaunch": false,
+    "lastCheckedAt": 1795010161025
   }
 }

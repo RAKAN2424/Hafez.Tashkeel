@@ -146,6 +146,15 @@ export interface VramPolicyConfig {
   unloadOnExit: boolean;
 }
 
+export type UpdateScheduleMode = 'off' | 'hourly_6' | 'daily' | 'weekly';
+
+export interface UpdatePolicyConfig {
+  schedule: UpdateScheduleMode;
+  notifyCriticalOnly: boolean;
+  autoUpdateOnLaunch: boolean;
+  lastCheckedAt: number;
+}
+
 export interface ActiveLoadedModelInfo {
   slotId: ModelSlotId;
   adapter: ResolvedAdapter;
@@ -207,6 +216,13 @@ const DEFAULT_VRAM_POLICY: VramPolicyConfig = {
   unloadOnExit: true,
 };
 
+const DEFAULT_UPDATE_POLICY: UpdatePolicyConfig = {
+  schedule: 'daily',
+  notifyCriticalOnly: true,
+  autoUpdateOnLaunch: false,
+  lastCheckedAt: 0,
+};
+
 function sanitizePathInput(p: string): string {
   let s = (p || '').trim();
   if (s.length >= 2 && ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'")))) {
@@ -257,11 +273,75 @@ function readRegistryFile(): {
   localModelsRoot?: string;
   searchRoots?: string[];
   vramPolicy?: Partial<VramPolicyConfig>;
+  updatePolicy?: Partial<UpdatePolicyConfig>;
   models: Record<ModelSlotId, ModelRegistryEntry>;
 } {
   const regPath = getRegistryPath();
   const raw = fs.readFileSync(regPath, 'utf-8');
   return JSON.parse(raw);
+}
+
+export function getUpdatePolicy(): UpdatePolicyConfig {
+  try {
+    const parsed = readRegistryFile();
+    const up = parsed.updatePolicy || {};
+    const validSchedules: UpdateScheduleMode[] = ['off', 'hourly_6', 'daily', 'weekly'];
+    const schedule: UpdateScheduleMode = validSchedules.includes(up.schedule as UpdateScheduleMode)
+      ? (up.schedule as UpdateScheduleMode)
+      : DEFAULT_UPDATE_POLICY.schedule;
+    return {
+      schedule,
+      notifyCriticalOnly:
+        up.notifyCriticalOnly !== undefined
+          ? Boolean(up.notifyCriticalOnly)
+          : DEFAULT_UPDATE_POLICY.notifyCriticalOnly,
+      autoUpdateOnLaunch:
+        up.autoUpdateOnLaunch !== undefined
+          ? Boolean(up.autoUpdateOnLaunch)
+          : DEFAULT_UPDATE_POLICY.autoUpdateOnLaunch,
+      lastCheckedAt: Number.isFinite(Number(up.lastCheckedAt)) ? Number(up.lastCheckedAt) : 0,
+    };
+  } catch {
+    return { ...DEFAULT_UPDATE_POLICY };
+  }
+}
+
+export function updateUpdatePolicy(updates: Partial<UpdatePolicyConfig>): UpdatePolicyConfig {
+  const regPath = getRegistryPath();
+  const parsed = readRegistryFile();
+  const current = getUpdatePolicy();
+  const validSchedules: UpdateScheduleMode[] = ['off', 'hourly_6', 'daily', 'weekly'];
+  const nextSchedule: UpdateScheduleMode =
+    updates.schedule && validSchedules.includes(updates.schedule)
+      ? updates.schedule
+      : current.schedule;
+
+  const nextPolicy: UpdatePolicyConfig = {
+    schedule: nextSchedule,
+    notifyCriticalOnly:
+      typeof updates.notifyCriticalOnly === 'boolean'
+        ? updates.notifyCriticalOnly
+        : current.notifyCriticalOnly,
+    autoUpdateOnLaunch:
+      typeof updates.autoUpdateOnLaunch === 'boolean'
+        ? updates.autoUpdateOnLaunch
+        : current.autoUpdateOnLaunch,
+    lastCheckedAt:
+      updates.lastCheckedAt !== undefined && Number.isFinite(Number(updates.lastCheckedAt))
+        ? Number(updates.lastCheckedAt)
+        : current.lastCheckedAt,
+  };
+
+  parsed.updatePolicy = nextPolicy;
+  fs.writeFileSync(regPath, JSON.stringify(parsed, null, 2) + '\n', 'utf-8');
+  return nextPolicy;
+}
+
+export function getUpdateIntervalMs(schedule: UpdateScheduleMode): number | null {
+  if (schedule === 'hourly_6') return 6 * 60 * 60 * 1000;
+  if (schedule === 'daily') return 24 * 60 * 60 * 1000;
+  if (schedule === 'weekly') return 7 * 24 * 60 * 60 * 1000;
+  return null;
 }
 
 export function getVramPolicy(): VramPolicyConfig {
@@ -1811,6 +1891,11 @@ export async function checkBackendUpdatesOnline(force = false): Promise<BackendU
     items,
   };
   cachedUpdateReport = report;
+  try {
+    updateUpdatePolicy({ lastCheckedAt: report.checkedAt });
+  } catch {
+    // ignore registry write failures in read-only environments
+  }
   return report;
 }
 

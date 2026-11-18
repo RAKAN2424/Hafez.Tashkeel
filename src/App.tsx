@@ -215,6 +215,15 @@ interface BackendUpdateReport {
   items: BackendUpdateItem[];
 }
 
+type UpdateScheduleMode = 'off' | 'hourly_6' | 'daily' | 'weekly';
+
+interface UpdatePolicyInfo {
+  schedule: UpdateScheduleMode;
+  notifyCriticalOnly: boolean;
+  autoUpdateOnLaunch: boolean;
+  lastCheckedAt: number;
+}
+
 interface PartitionScanInfo {
   scannedAt: number;
   scannedPartitions: string[];
@@ -346,14 +355,32 @@ const App = () => {
   const [updateReport, setUpdateReport] = useState<BackendUpdateReport | null>(null);
   const [isCheckingUpdates, setIsCheckingUpdates] = useState(false);
   const [isAutoUpdating, setIsAutoUpdating] = useState(false);
-  const [autoUpdateOnLaunch, setAutoUpdateOnLaunch] = useState<boolean>(() => {
+  const [updatePolicy, setUpdatePolicy] = useState<UpdatePolicyInfo>(() => {
+    let savedSchedule: UpdateScheduleMode = 'daily';
+    let savedNotifyCritical = true;
+    let savedAutoLaunch = false;
     if (typeof window !== 'undefined') {
-      return localStorage.getItem('hafiz_auto_update_on_launch') !== '0';
+      const s = localStorage.getItem('hafiz_update_schedule');
+      if (s === 'off' || s === 'hourly_6' || s === 'daily' || s === 'weekly') {
+        savedSchedule = s;
+      }
+      const n = localStorage.getItem('hafiz_notify_critical_only');
+      if (n === '0') savedNotifyCritical = false;
+      savedAutoLaunch = localStorage.getItem('hafiz_auto_update_on_launch') === '1';
     }
-    return true;
+    return {
+      schedule: savedSchedule,
+      notifyCriticalOnly: savedNotifyCritical,
+      autoUpdateOnLaunch: savedAutoLaunch,
+      lastCheckedAt: 0,
+    };
   });
+  const [isSavingUpdatePolicy, setIsSavingUpdatePolicy] = useState(false);
+  const [setupStatusLoaded, setSetupStatusLoaded] = useState(false);
+  const [updateNotificationDismissed, setUpdateNotificationDismissed] = useState(false);
   const [autoUpdateNotice, setAutoUpdateNotice] = useState<string | null>(null);
   const autoUpdateTriggeredRef = useRef(false);
+  const scheduledCheckTriggeredRef = useRef(false);
 
   // UI & Theme state
   const [isLoading, setIsLoading] = useState(false);
@@ -464,6 +491,21 @@ const App = () => {
         if (data.machine) setMachineEnv(data.machine);
         if (data.partitionScan) setPartitionScan(data.partitionScan);
         if (data.updateReport) setUpdateReport(data.updateReport);
+        if (data.updatePolicy) {
+          setUpdatePolicy(data.updatePolicy);
+          if (typeof window !== 'undefined') {
+            localStorage.setItem('hafiz_update_schedule', data.updatePolicy.schedule);
+            localStorage.setItem(
+              'hafiz_notify_critical_only',
+              data.updatePolicy.notifyCriticalOnly ? '1' : '0'
+            );
+            localStorage.setItem(
+              'hafiz_auto_update_on_launch',
+              data.updatePolicy.autoUpdateOnLaunch ? '1' : '0'
+            );
+          }
+        }
+        setSetupStatusLoaded(true);
         if (Array.isArray(data.models)) {
           setModelSlots(data.models);
           syncSlotDrafts(data.models);
@@ -492,7 +534,7 @@ const App = () => {
         }
       }
     } catch {
-      // ignore initial background setup fetch error
+      setSetupStatusLoaded(true);
     }
   };
 
@@ -532,6 +574,13 @@ const App = () => {
     }
   };
 
+  const getScheduleIntervalMs = (schedule: UpdateScheduleMode): number => {
+    if (schedule === 'hourly_6') return 6 * 60 * 60 * 1000;
+    if (schedule === 'daily') return 24 * 60 * 60 * 1000;
+    if (schedule === 'weekly') return 7 * 24 * 60 * 60 * 1000;
+    return 0;
+  };
+
   const checkBackendUpdates = async (force = false, triggerAutoIfEnabled = false) => {
     setIsCheckingUpdates(true);
     try {
@@ -540,9 +589,17 @@ const App = () => {
       if (res.ok && data.updateReport) {
         const rep: BackendUpdateReport = data.updateReport;
         setUpdateReport(rep);
+        const policy: UpdatePolicyInfo = data.updatePolicy || updatePolicy;
+        if (data.updatePolicy) {
+          setUpdatePolicy(data.updatePolicy);
+        }
+        const criticalFound = (rep.cudaUpgradeCount || 0) + (rep.missingCoreCount || 0) > 0;
+        if (force || criticalFound) {
+          setUpdateNotificationDismissed(false);
+        }
         if (
           triggerAutoIfEnabled &&
-          autoUpdateOnLaunch &&
+          policy.autoUpdateOnLaunch &&
           !autoUpdateTriggeredRef.current &&
           rep.onlineReachable &&
           (rep.outdatedCount > 0 || rep.cudaUpgradeCount > 0)
@@ -558,10 +615,36 @@ const App = () => {
     }
   };
 
-  const handleToggleAutoUpdateOnLaunch = (nextVal: boolean) => {
-    setAutoUpdateOnLaunch(nextVal);
-    if (typeof window !== 'undefined') {
-      localStorage.setItem('hafiz_auto_update_on_launch', nextVal ? '1' : '0');
+  const handleSaveUpdatePolicy = async (
+    updates: Partial<{ schedule: UpdateScheduleMode; notifyCriticalOnly: boolean; autoUpdateOnLaunch: boolean }>
+  ) => {
+    setIsSavingUpdatePolicy(true);
+    setUpdatePolicy((prev) => {
+      const optimistic = { ...prev, ...updates };
+      if (typeof window !== 'undefined') {
+        localStorage.setItem('hafiz_update_schedule', optimistic.schedule);
+        localStorage.setItem('hafiz_notify_critical_only', optimistic.notifyCriticalOnly ? '1' : '0');
+        localStorage.setItem('hafiz_auto_update_on_launch', optimistic.autoUpdateOnLaunch ? '1' : '0');
+      }
+      return optimistic;
+    });
+    if (updates.notifyCriticalOnly !== undefined) {
+      setUpdateNotificationDismissed(false);
+    }
+    try {
+      const res = await fetch('/api/setup/update-policy', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updates),
+      });
+      const data = await res.json();
+      if (res.ok && data.updatePolicy) {
+        setUpdatePolicy(data.updatePolicy);
+      }
+    } catch {
+      // ignore offline save fallback (localStorage already synced)
+    } finally {
+      setIsSavingUpdatePolicy(false);
     }
   };
 
@@ -1105,8 +1188,25 @@ const App = () => {
 
   useEffect(() => {
     fetchModelsStatus();
-    checkBackendUpdates(false, true);
   }, []);
+
+  useEffect(() => {
+    if (!setupStatusLoaded) return;
+    if (updatePolicy.schedule === 'off') return;
+    const intervalMs = getScheduleIntervalMs(updatePolicy.schedule);
+    if (!intervalMs) return;
+
+    const elapsed = Date.now() - (updatePolicy.lastCheckedAt || 0);
+    if (!scheduledCheckTriggeredRef.current && (updatePolicy.lastCheckedAt === 0 || elapsed >= intervalMs)) {
+      scheduledCheckTriggeredRef.current = true;
+      checkBackendUpdates(false, updatePolicy.autoUpdateOnLaunch);
+    }
+
+    const bgTimer = setInterval(() => {
+      checkBackendUpdates(true, false);
+    }, intervalMs);
+    return () => clearInterval(bgTimer);
+  }, [setupStatusLoaded, updatePolicy.schedule, updatePolicy.lastCheckedAt, updatePolicy.autoUpdateOnLaunch]);
 
   useEffect(() => {
     if (!isLoading && lastEngineUsed) {
@@ -2312,44 +2412,74 @@ const App = () => {
       {/* MAIN WORKSPACE CONTENT                                                */}
       {/* ===================================================================== */}
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 py-6 space-y-6">
-        {/* Startup Online Backend & CUDA Auto-Update Banner */}
-        {(isAutoUpdating || autoUpdateNotice || (updateReport && (updateReport.outdatedCount > 0 || updateReport.cudaUpgradeCount > 0))) && (
-          <div className="p-3.5 rounded-xl border border-indigo-200 dark:border-indigo-900/70 bg-indigo-50/70 dark:bg-indigo-950/30 text-indigo-800 dark:text-indigo-200 flex flex-wrap items-center justify-between gap-3 text-xs">
-            <div className="flex items-center gap-2.5 min-w-0">
-              <RefreshCw size={15} className={`shrink-0 ${isAutoUpdating ? 'animate-spin' : ''}`} />
-              <span className="font-semibold">
-                {isAutoUpdating
-                  ? t.setupUpdatesUpdating
-                  : autoUpdateNotice
-                  ? autoUpdateNotice
-                  : language === 'ar'
-                  ? `متاح أونلاين: ${updateReport?.outdatedCount ?? 0} تحديث مكتبة و ${updateReport?.cudaUpgradeCount ?? 0} ترقية CUDA لتسريع الأداء.`
-                  : `Online updates found: ${updateReport?.outdatedCount ?? 0} package(s) and ${updateReport?.cudaUpgradeCount ?? 0} CUDA upgrade(s).`}
-              </span>
-            </div>
-            <div className="flex items-center gap-2 shrink-0">
-              {updateReport && (updateReport.outdatedCount > 0 || updateReport.cudaUpgradeCount > 0) && (
+        {/* Scheduled Background Update & Essential CUDA Upgrade Notification Banner */}
+        {(() => {
+          const criticalUpgradeCount =
+            (updateReport?.cudaUpgradeCount ?? 0) + (updateReport?.missingCoreCount ?? 0);
+          const optionalOutdatedCount = updateReport?.outdatedCount ?? 0;
+          const shouldShowBanner =
+            !updateNotificationDismissed &&
+            (isAutoUpdating ||
+              Boolean(autoUpdateNotice) ||
+              (Boolean(updateReport) &&
+                (updatePolicy.notifyCriticalOnly
+                  ? criticalUpgradeCount > 0
+                  : optionalOutdatedCount > 0 || criticalUpgradeCount > 0)));
+          if (!shouldShowBanner) return null;
+
+          const isCritical = criticalUpgradeCount > 0;
+          return (
+            <div
+              className={`p-3.5 rounded-xl border flex flex-wrap items-center justify-between gap-3 text-xs ${
+                isCritical
+                  ? 'border-amber-200 dark:border-amber-900/70 bg-amber-50/80 dark:bg-amber-950/30 text-amber-900 dark:text-amber-200'
+                  : 'border-indigo-200 dark:border-indigo-900/70 bg-indigo-50/70 dark:bg-indigo-950/30 text-indigo-800 dark:text-indigo-200'
+              }`}
+            >
+              <div className="flex items-center gap-2.5 min-w-0">
+                <RefreshCw size={15} className={`shrink-0 ${isAutoUpdating ? 'animate-spin' : ''}`} />
+                <span className="font-semibold">
+                  {isAutoUpdating
+                    ? t.setupUpdatesUpdating
+                    : autoUpdateNotice
+                    ? autoUpdateNotice
+                    : isCritical
+                    ? `${t.setupCriticalUpgradeBanner} (${updateReport?.cudaUpgradeCount ?? 0} CUDA · ${
+                        updateReport?.missingCoreCount ?? 0
+                      } ${language === 'ar' ? 'مكتبة أساسية' : 'core'})`
+                    : language === 'ar'
+                    ? `متاح أونلاين: ${optionalOutdatedCount} تحديث اختياري للمكتبات.`
+                    : `Optional updates available: ${optionalOutdatedCount} package(s).`}
+                </span>
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                {updateReport && (optionalOutdatedCount > 0 || criticalUpgradeCount > 0) && (
+                  <button
+                    type="button"
+                    onClick={() => handleAutoUpdateAll(isCritical)}
+                    disabled={isAutoUpdating}
+                    className={`h-8 px-3 rounded-lg text-white font-semibold disabled:opacity-40 whitespace-nowrap ${
+                      isCritical ? 'bg-amber-600 hover:bg-amber-500' : 'bg-indigo-600 hover:bg-indigo-500'
+                    }`}
+                  >
+                    {isAutoUpdating ? t.setupUpdatesUpdating : t.setupUpdatesAutoBtn}
+                  </button>
+                )}
                 <button
                   type="button"
-                  onClick={() => handleAutoUpdateAll(false)}
-                  disabled={isAutoUpdating}
-                  className="h-8 px-3 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-semibold disabled:opacity-40 whitespace-nowrap"
-                >
-                  {isAutoUpdating ? t.setupUpdatesUpdating : t.setupUpdatesAutoBtn}
-                </button>
-              )}
-              {autoUpdateNotice && (
-                <button
-                  type="button"
-                  onClick={() => setAutoUpdateNotice(null)}
-                  className="p-1 text-indigo-500 hover:text-indigo-700 dark:hover:text-white"
+                  onClick={() => {
+                    setUpdateNotificationDismissed(true);
+                    setAutoUpdateNotice(null);
+                  }}
+                  className="p-1 opacity-75 hover:opacity-100"
+                  aria-label={t.close}
                 >
                   <X size={14} />
                 </button>
-              )}
+              </div>
             </div>
-          </div>
-        )}
+          );
+        })()}
 
         {/* Startup Auto-Bound Partition Models Notice (inside Studio/Audio) */}
         {autoAssignNotice && (activeTab === 'studio' || activeTab === 'audio') && (
@@ -4142,17 +4272,52 @@ const App = () => {
                   </div>
                 </div>
 
-                <div className="p-3 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#0B0D11] flex items-center">
-                  <label className="inline-flex items-center gap-2 text-xs font-medium text-slate-700 dark:text-slate-300 cursor-pointer select-none">
-                    <input
-                      type="checkbox"
-                      checked={autoUpdateOnLaunch}
-                      onChange={(e) => handleToggleAutoUpdateOnLaunch(e.target.checked)}
-                      className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
-                    />
-                    <span>{t.setupUpdatesAutoLaunchLabel}</span>
+                <div className="p-3 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#0B0D11] space-y-1.5">
+                  <label className="block text-slate-500 dark:text-slate-400 font-medium">
+                    {t.setupUpdateScheduleLabel}
                   </label>
+                  <select
+                    value={updatePolicy.schedule}
+                    disabled={isSavingUpdatePolicy}
+                    onChange={(e) =>
+                      handleSaveUpdatePolicy({ schedule: e.target.value as UpdateScheduleMode })
+                    }
+                    className="w-full h-9 px-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#13161C] text-xs font-medium text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  >
+                    <option value="off">{t.setupScheduleOff}</option>
+                    <option value="hourly_6">{t.setupSchedule6h}</option>
+                    <option value="daily">{t.setupScheduleDaily}</option>
+                    <option value="weekly">{t.setupScheduleWeekly}</option>
+                  </select>
                 </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+                <label className="p-3 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#0B0D11] flex items-start gap-2.5 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={updatePolicy.notifyCriticalOnly}
+                    disabled={isSavingUpdatePolicy}
+                    onChange={(e) => handleSaveUpdatePolicy({ notifyCriticalOnly: e.target.checked })}
+                    className="mt-0.5 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+                  />
+                  <span className="font-medium text-slate-700 dark:text-slate-300 leading-relaxed">
+                    {t.setupNotifyCriticalOnlyLabel}
+                  </span>
+                </label>
+
+                <label className="p-3 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#0B0D11] flex items-start gap-2.5 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={updatePolicy.autoUpdateOnLaunch}
+                    disabled={isSavingUpdatePolicy}
+                    onChange={(e) => handleSaveUpdatePolicy({ autoUpdateOnLaunch: e.target.checked })}
+                    className="mt-0.5 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+                  />
+                  <span className="font-medium text-slate-700 dark:text-slate-300 leading-relaxed">
+                    {t.setupUpdatesAutoLaunchLabel}
+                  </span>
+                </label>
               </div>
 
               {updateReport && updateReport.items.some((i) => i.status === 'update_available' || i.status === 'cuda_upgrade_needed') && (
